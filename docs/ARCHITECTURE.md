@@ -553,3 +553,70 @@ File operation and child process interception via inotify/FSEvents and process t
 | Transactional email | Resend | Simple API, good deliverability |
 | Trust network auth | mTLS or API keys | Standard mutual authentication |
 | Marketplace payouts | Stripe Connect | Don't build payment infrastructure |
+
+---
+
+## 15. Component Summary
+
+High-level overview of platform layers (detailed specifications in Sections 10–13 above).
+
+### 15.1 Layer 2 — Control Plane
+
+| Component | What It Does |
+|---|---|
+| Trace Uploader | `relic trace push` — pushes `.trtrace` files to control plane API. |
+| Control Plane API | Single Go service: ingest, query, org management, policy distribution, agent registration. |
+| Policy Authority | Source of truth for policies. Agents pull current policy. Local files as fallback. |
+| Agent Registry | Identity registration, capability attestation, behavioral baselines. |
+| Web Application | React SPA: run list, trace viewer, search, settings, onboarding, proposals. |
+| Auth | Supabase Auth integration for signup, org creation, team invites. |
+| Billing | Stripe for subscription tiers and retention enforcement. |
+
+### 15.2 Layer 3 — Governance Agents
+
+| Component | What It Does |
+|---|---|
+| Governance Agent Service | Go background worker. Reads traces via API, detects denial patterns, classifies intent via LLM. Stateless consumer of control plane. |
+| Policy Proposals | Data model, API endpoints, and web UI for one-click approve/reject. |
+| Notification Service | Email (Resend), Slack, webhooks for governance agent alerts. |
+| Specialized Agents | Anomaly detection, compliance reporting, policy optimization (later). |
+
+### 15.3 Layer 4 — Trust Network
+
+| Component | What It Does |
+|---|---|
+| Network Mediation | Same mediation engine, public endpoint with mTLS/API key auth. |
+| Capability Registry | Agents publish MCP tool definitions. Searchable. Trust scores. |
+| Bilateral Policy Generator | Platform generates mutual policy templates for agent-to-agent interactions. |
+| Transaction Ledger | Metered interactions, daily aggregation, Stripe Connect payouts. |
+
+### 15.4 Enterprise Components (Deferred)
+
+| Component | What It Does |
+|---|---|
+| Identity Service | Cryptographic agent identity signed by org CA (Ed25519). |
+| Policy Registry | Centralized policy management with approval workflows. |
+| Capability Verifier | Tool package signing and verification. |
+| Delegation Governor | Multi-agent permission propagation with scope reduction. |
+| Compliance Engine | Audit exports (SOC 2, HIPAA), SIEM integration. |
+| HTTPS Inspector | Full TLS interception for HTTP body capture. |
+| Filesystem Monitor | File operation tracking via inotify/FSEvents. |
+
+---
+
+## 16. Design Decisions Log (Platform)
+
+| Decision | Chose | Over | Why |
+|---|---|---|---|
+| Hosted role | Control plane | Trace warehouse | Policy + registration are control plane functions |
+| Gov agent | Stateless CP consumer | Standalone + own DB | Single source of truth |
+| Hosted architecture | Single API service | Separate ingest/query | One service to deploy, monitor, debug; split later |
+| Hosted action index | None (parse trace files) | Postgres action table | Dramatically simpler operations; sufficient at early scale |
+| Governance agent location | Hosted backend service | Runs on user's machine | Cannot be compromised by user's agent; has global view across all runs |
+| Governance agent arch | Background worker polling API | Real-time stream processing | Simpler to build and operate; proposals are not time-critical |
+| Intent classification | LLM (Claude API) | Rule-based heuristics | Tool call parameters are natural language; heuristics break on edge cases |
+| Trust network auth | mTLS or API keys | OAuth / JWT | mTLS provides mutual authentication without token management |
+| Trust scoring | Trace-derived behavioral signals | Self-reported reputation | Behavioral data is unforgeable; self-reported scores are gameable |
+| Bilateral policies | Platform-generated templates | User-written from scratch | Users won't write cross-org policies manually; templates reduce friction |
+| Transaction settlement | Stripe Connect | Custom payment system | Don't build payment infrastructure |
+| License strategy | MIT for CLI + BSL for hosted platform | Full MIT or full BSL | MIT maximizes CLI adoption; BSL protects hosted revenue; split avoids both penalties |
