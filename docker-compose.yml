@@ -1,0 +1,47 @@
+services:
+  db:
+    image: supabase/postgres:15.6.1.143
+    ports:
+      - "54322:5432"
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: therelic
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/therelic?sslmode=disable
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: traces
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      PORT: "8080"
+      SUPABASE_JWT_SECRET: super-secret-jwt-token-for-dev
+    depends_on:
+      db:
+        condition: service_healthy
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - miniodata:/data
+
+volumes:
+  pgdata:
+  miniodata:
