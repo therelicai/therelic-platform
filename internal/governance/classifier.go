@@ -2,8 +2,13 @@ package governance
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
+
+	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 type IntentClassification struct {
@@ -36,7 +41,6 @@ func (c *Classifier) ClassifyDenial(ctx context.Context, tool string, params str
 		}, nil
 	}
 
-	// Build classification prompt
 	prompt := fmt.Sprintf(
 		`Classify this denied agent action:
 Tool: %s
@@ -45,18 +49,61 @@ Denial count (recent): %d
 
 Is this likely a policy gap (user wants it allowed but hasn't configured it) or a correct denial (user intentionally blocks this)?
 
-Respond with JSON: {"intent": "...", "category": "...", "is_gap": bool, "confidence": 0.0-1.0, "reasoning": "..."}`,
+Respond with JSON only, no other text: {"intent": "...", "category": "...", "is_gap": bool, "confidence": 0.0-1.0, "reasoning": "..."}`,
 		tool, params, denyCount,
 	)
 
-	_ = prompt
-	// TODO: Call Anthropic Claude API with the prompt
-	// For now, return a conservative classification
-	return &IntentClassification{
-		Intent:     tool,
-		Category:   "pending_classification",
-		IsGap:      denyCount > 10,
-		Confidence: 0.5,
-		Reasoning:  "automated threshold-based classification — LLM classification pending",
-	}, nil
+	client := anthropic.NewClient(option.WithAPIKey(c.anthropicKey))
+
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		MaxTokens: 1024,
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
+		},
+		Model: anthropic.ModelClaudeSonnet4_5,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("anthropic API call: %w", err)
+	}
+
+	var responseText strings.Builder
+	for _, block := range msg.Content {
+		if block.Type == "text" && block.Text != "" {
+			responseText.WriteString(block.Text)
+		}
+	}
+
+	text := strings.TrimSpace(responseText.String())
+	if text == "" {
+		return &IntentClassification{
+			Intent:     tool,
+			Category:   "pending_classification",
+			IsGap:      denyCount > 10,
+			Confidence: 0.5,
+			Reasoning:  "empty LLM response — fallback to threshold",
+		}, nil
+	}
+
+	// Extract JSON from response (may be wrapped in markdown code blocks)
+	jsonStr := text
+	if idx := strings.Index(text, "{"); idx >= 0 {
+		jsonStr = text[idx:]
+	}
+	if idx := strings.LastIndex(jsonStr, "}"); idx >= 0 {
+		jsonStr = jsonStr[:idx+1]
+	}
+
+	var out IntentClassification
+	if err := json.Unmarshal([]byte(jsonStr), &out); err != nil {
+		c.logger.Warn("failed to parse classification JSON", "response", text, "error", err)
+		return &IntentClassification{
+			Intent:     tool,
+			Category:   "pending_classification",
+			IsGap:      denyCount > 10,
+			Confidence: 0.5,
+			Reasoning:  "LLM response parse failed — fallback to threshold",
+		}, nil
+	}
+
+	return &out, nil
 }

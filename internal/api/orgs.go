@@ -112,6 +112,11 @@ func (s *Server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleOnboard(w http.ResponseWriter, r *http.Request) {
+	// Explicit org creation for onboarding flow
+	s.handleCreateOrg(w, r)
+}
+
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	orgID := middleware.OrgIDFromContext(r.Context())

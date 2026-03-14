@@ -96,15 +96,73 @@ func (s *Server) handleGetAgentPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Policy distribution: return stored policy for this agent
-	// For now, return 501 until policy storage is implemented
-	writeJSON(w, http.StatusNotImplemented, map[string]string{
-		"error": "policy distribution not yet implemented",
+	policyYAML, err := s.db.GetAgentPolicy(r.Context(), orgID, name)
+	if err != nil {
+		s.logger.Error("failed to get agent policy", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"policy": policyYAML,
 	})
 }
 
 func (s *Server) handleUpdateAgentPolicy(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{
-		"error": "policy update not yet implemented",
+	orgID := middleware.OrgIDFromContext(r.Context())
+	name := chi.URLParam(r, "name")
+
+	agent, err := s.db.GetAgent(r.Context(), orgID, name)
+	if err != nil || agent == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found"})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+
+	var req struct {
+		Policy string `json:"policy"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+
+	if err := s.db.UpdateAgentPolicy(r.Context(), orgID, name, req.Policy); err != nil {
+		s.logger.Error("failed to update agent policy", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "updated",
 	})
+}
+
+func (s *Server) handleGetAgentBaseline(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	name := chi.URLParam(r, "name")
+
+	agent, err := s.db.GetAgent(r.Context(), orgID, name)
+	if err != nil || agent == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found"})
+		return
+	}
+
+	baseline, err := s.db.GetAgentBaseline(r.Context(), agent.ID)
+	if err != nil {
+		s.logger.Error("failed to get agent baseline", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
+		return
+	}
+	if baseline == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no baseline found for this agent"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, baseline)
 }

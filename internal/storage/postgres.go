@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -234,6 +235,26 @@ type Agent struct {
 	LastSeen         time.Time `json:"last_seen"`
 }
 
+type AgentBaseline struct {
+	AgentID          string    `json:"agent_id"`
+	ComputedAt       time.Time `json:"computed_at"`
+	WindowDays       int       `json:"window_days"`
+	AvgActionsPerRun float64   `json:"avg_actions_per_run"`
+	AvgDenialsPerRun float64   `json:"avg_denials_per_run"`
+	ToolDistribution []byte    `json:"tool_distribution"`
+}
+
+type AuditEvent struct {
+	ID         string    `json:"id"`
+	OrgID      string    `json:"org_id"`
+	UserID     string    `json:"user_id"`
+	Action     string    `json:"action"`
+	Resource   string    `json:"resource"`
+	ResourceID string    `json:"resource_id"`
+	Metadata   []byte    `json:"metadata"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 func (p *Postgres) UpsertAgent(ctx context.Context, a *Agent) error {
 	_, err := p.pool.Exec(ctx,
 		`INSERT INTO agents (org_id, name, version, identity_manifest, capabilities_hash, policy_hash)
@@ -285,6 +306,178 @@ func (p *Postgres) GetAgent(ctx context.Context, orgID, name string) (*Agent, er
 		return nil, err
 	}
 	return a, nil
+}
+
+func (p *Postgres) GetAgentPolicy(ctx context.Context, orgID, agentName string) (string, error) {
+	var policyYAML string
+	err := p.pool.QueryRow(ctx,
+		`SELECT COALESCE(policy_yaml, '') FROM agents WHERE org_id = $1 AND name = $2`, orgID, agentName,
+	).Scan(&policyYAML)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get agent policy: %w", err)
+	}
+	return policyYAML, nil
+}
+
+func (p *Postgres) UpdateAgentPolicy(ctx context.Context, orgID, agentName, policyYAML string) error {
+	_, err := p.pool.Exec(ctx,
+		`UPDATE agents SET policy_yaml = $1, policy_updated_at = now() WHERE org_id = $2 AND name = $3`,
+		policyYAML, orgID, agentName,
+	)
+	if err != nil {
+		return fmt.Errorf("update agent policy: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) GetAgentBaseline(ctx context.Context, agentID string) (*AgentBaseline, error) {
+	b := &AgentBaseline{}
+	err := p.pool.QueryRow(ctx,
+		`SELECT agent_id, computed_at, window_days, avg_actions_per_run, avg_denials_per_run, tool_distribution
+		 FROM agent_baselines WHERE agent_id = $1 ORDER BY computed_at DESC LIMIT 1`, agentID,
+	).Scan(&b.AgentID, &b.ComputedAt, &b.WindowDays, &b.AvgActionsPerRun, &b.AvgDenialsPerRun, &b.ToolDistribution)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get agent baseline: %w", err)
+	}
+	return b, nil
+}
+
+func (p *Postgres) InsertBaseline(ctx context.Context, baseline *AgentBaseline) error {
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO agent_baselines (agent_id, computed_at, window_days, avg_actions_per_run, avg_denials_per_run, tool_distribution)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		baseline.AgentID, baseline.ComputedAt, baseline.WindowDays,
+		baseline.AvgActionsPerRun, baseline.AvgDenialsPerRun, baseline.ToolDistribution,
+	)
+	if err != nil {
+		return fmt.Errorf("insert baseline: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) ComputeBaseline(ctx context.Context, agentID string, windowDays int) (*AgentBaseline, error) {
+	agent, err := p.GetAgentByID(ctx, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("get agent: %w", err)
+	}
+	if agent == nil {
+		return nil, fmt.Errorf("agent not found")
+	}
+
+	var avgActions, avgDenials float64
+	var runCount int
+	err = p.pool.QueryRow(ctx,
+		`SELECT COALESCE(AVG(actions_total::float), 0), COALESCE(AVG(actions_denied::float), 0), COUNT(*)
+		 FROM runs
+		 WHERE org_id = $1 AND agent_name = $2
+		   AND started_at >= now() - ($3 * interval '1 day')`,
+		agent.OrgID, agent.Name, windowDays,
+	).Scan(&avgActions, &avgDenials, &runCount)
+	if err != nil {
+		return nil, fmt.Errorf("compute baseline: %w", err)
+	}
+
+	emptyToolDist, _ := json.Marshal(map[string]any{})
+	baseline := &AgentBaseline{
+		AgentID:          agentID,
+		ComputedAt:       time.Now(),
+		WindowDays:       windowDays,
+		AvgActionsPerRun: avgActions,
+		AvgDenialsPerRun: avgDenials,
+		ToolDistribution: emptyToolDist,
+	}
+	return baseline, nil
+}
+
+func (p *Postgres) GetAgentByID(ctx context.Context, agentID string) (*Agent, error) {
+	a := &Agent{}
+	err := p.pool.QueryRow(ctx,
+		`SELECT id, org_id, name, version, identity_manifest, capabilities_hash, policy_hash, registered_at, last_seen
+		 FROM agents WHERE id = $1`, agentID,
+	).Scan(&a.ID, &a.OrgID, &a.Name, &a.Version, &a.IdentityManifest,
+		&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get agent by id: %w", err)
+	}
+	return a, nil
+}
+
+func (p *Postgres) InsertAuditEvent(ctx context.Context, orgID, userID, action, resource, resourceID string, metadata []byte) error {
+	if metadata == nil {
+		metadata = []byte("{}")
+	}
+	_, err := p.pool.Exec(ctx,
+		`INSERT INTO audit_events (org_id, user_id, action, resource, resource_id, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		orgID, userID, action, resource, resourceID, metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("insert audit event: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) ListAuditEvents(ctx context.Context, orgID string, limit, offset int) ([]AuditEvent, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, org_id, user_id, action, resource, resource_id, metadata, created_at
+		 FROM audit_events WHERE org_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+		orgID, limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list audit events: %w", err)
+	}
+	defer rows.Close()
+
+	var events []AuditEvent
+	for rows.Next() {
+		var e AuditEvent
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.UserID, &e.Action, &e.Resource, &e.ResourceID, &e.Metadata, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan audit event: %w", err)
+		}
+		events = append(events, e)
+	}
+	return events, nil
+}
+
+func (p *Postgres) ListOrgs(ctx context.Context) ([]string, error) {
+	rows, err := p.pool.Query(ctx, `SELECT id FROM organizations ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list orgs: %w", err)
+	}
+	defer rows.Close()
+
+	var orgIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan org id: %w", err)
+		}
+		orgIDs = append(orgIDs, id)
+	}
+	return orgIDs, nil
+}
+
+func (p *Postgres) GetUserByID(ctx context.Context, userID string) (*User, error) {
+	u := &User{}
+	err := p.pool.QueryRow(ctx,
+		`SELECT id, org_id, email, role, created_at FROM users WHERE id = $1`, userID,
+	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get user by id: %w", err)
+	}
+	return u, nil
 }
 
 // --- Proposals ---

@@ -14,10 +14,10 @@ type Proposer struct {
 	logger     *slog.Logger
 }
 
-func NewProposer(db *storage.Postgres, anthropicKey string, logger *slog.Logger) *Proposer {
+func NewProposer(db *storage.Postgres, s3 *storage.S3, anthropicKey string, logger *slog.Logger) *Proposer {
 	return &Proposer{
 		db:         db,
-		detector:   NewDetector(db, logger),
+		detector:   NewDetector(db, s3, logger),
 		classifier: NewClassifier(anthropicKey, logger),
 		logger:     logger,
 	}
