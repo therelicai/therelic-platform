@@ -553,13 +553,27 @@ func (p *Postgres) ListProposals(ctx context.Context, orgID, status string) ([]P
 	return proposals, nil
 }
 
-func (p *Postgres) UpdateProposalStatus(ctx context.Context, orgID, proposalID, status, userID string) error {
-	_, err := p.pool.Exec(ctx,
+// UpdateProposalStatus sets the status, decided_at, and decided_by columns
+// on a proposal scoped to orgID. The boolean return distinguishes between
+// "no rows matched" (proposal id is wrong or belongs to another org) and
+// "row updated"; callers should turn no-match into 404.
+//
+// decided_by may be empty for system-initiated transitions (e.g.
+// expiration sweeps), so we pass a nullable string to the column.
+func (p *Postgres) UpdateProposalStatus(ctx context.Context, orgID, proposalID, status, userID string) (bool, error) {
+	var decidedBy any
+	if userID != "" {
+		decidedBy = userID
+	}
+	tag, err := p.pool.Exec(ctx,
 		`UPDATE proposals SET status = $1, decided_at = now(), decided_by = $2
 		 WHERE id = $3 AND org_id = $4`,
-		status, userID, proposalID, orgID,
+		status, decidedBy, proposalID, orgID,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // --- Users ---

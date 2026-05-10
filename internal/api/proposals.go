@@ -42,39 +42,48 @@ func (s *Server) handleGetProposal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleApproveProposal(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	userID := middleware.UserIDFromContext(r.Context())
-	proposalID := chi.URLParam(r, "proposalID")
-
-	if err := s.db.UpdateProposalStatus(r.Context(), orgID, proposalID, "approved", userID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+	s.decideProposal(w, r, "approved", auditProposalAccept)
 }
 
 func (s *Server) handleRejectProposal(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	userID := middleware.UserIDFromContext(r.Context())
-	proposalID := chi.URLParam(r, "proposalID")
-
-	if err := s.db.UpdateProposalStatus(r.Context(), orgID, proposalID, "rejected", userID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+	s.decideProposal(w, r, "rejected", auditProposalReject)
 }
 
 func (s *Server) handleDismissProposal(w http.ResponseWriter, r *http.Request) {
+	s.decideProposal(w, r, "dismissed", auditProposalDismiss)
+}
+
+// decideProposal centralizes the three identical "set status + audit"
+// handlers. Returns 404 for unknown proposal ids (so callers can tell
+// the difference between a successful no-op and a typo) and writes an
+// audit row regardless of the verdict.
+func (s *Server) decideProposal(w http.ResponseWriter, r *http.Request, status string, action auditAction) {
 	orgID := middleware.OrgIDFromContext(r.Context())
+	if orgID == "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+		return
+	}
+	userID := middleware.UserIDFromContext(r.Context())
 	proposalID := chi.URLParam(r, "proposalID")
 
-	if err := s.db.UpdateProposalStatus(r.Context(), orgID, proposalID, "dismissed", ""); err != nil {
+	updated, err := s.db.UpdateProposalStatus(r.Context(), orgID, proposalID, status, userID)
+	if err != nil {
+		s.logger.Error("update proposal status", "error", err, "proposal_id", proposalID)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
 		return
 	}
+	if !updated {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "proposal not found"})
+		return
+	}
 
-	w.WriteHeader(http.StatusNoContent)
+	s.auditLog(r.Context(), action, "proposal", proposalID, map[string]any{
+		"status": status,
+	})
+
+	if status == "dismissed" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": status})
 }

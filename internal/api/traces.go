@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
 	"github.com/therelicai/therelic-platform/internal/api/middleware"
 	"github.com/therelicai/therelic-platform/internal/storage"
 	tracepkg "github.com/therelicai/therelic-platform/internal/trace"
@@ -145,21 +146,12 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Best-effort audit log so the org can see who uploaded what.
-	userID := middleware.UserIDFromContext(r.Context())
-	if userID == "" {
-		userID = "api-key" // API-key uploads have no user subject
-	}
-	auditMeta, _ := json.Marshal(map[string]any{
+	s.auditLog(r.Context(), auditTraceUpload, "run", runID, map[string]any{
 		"agent_name":      agentName,
 		"actions_total":   summary.ActionsTotal,
 		"actions_denied":  summary.ActionsDenied,
 		"integrity_chain": summary.HasIntegrityChain,
 	})
-	if err := s.db.InsertAuditEvent(r.Context(), orgID, userID, "trace.upload", "run", runID, auditMeta); err != nil {
-		// Don't fail the upload — audit is observational.
-		s.logger.Warn("failed to write audit event", "error", err, "run_id", runID)
-	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"run_id":          runID,
@@ -272,14 +264,7 @@ func (s *Server) handleDeleteTrace(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("failed to delete trace from S3", "error", err, "key", storageKey)
 	}
 
-	// Audit the deletion so an org admin can see what was purged.
-	userID := middleware.UserIDFromContext(r.Context())
-	if userID == "" {
-		userID = "api-key"
-	}
-	if err := s.db.InsertAuditEvent(r.Context(), orgID, userID, "trace.delete", "run", runID, nil); err != nil {
-		s.logger.Warn("failed to write audit event", "error", err)
-	}
+	s.auditLog(r.Context(), auditTraceDelete, "run", runID, nil)
 
 	w.WriteHeader(http.StatusNoContent)
 }

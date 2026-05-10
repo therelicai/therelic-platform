@@ -40,6 +40,17 @@ func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Audit against the new org so the row lands in the org's own log
+	// — the request context org_id is probably empty for fresh signups.
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == "" {
+		userID = "api-key"
+	}
+	meta, _ := json.Marshal(map[string]any{"slug": req.Slug, "name": req.Name})
+	if err := s.db.InsertAuditEvent(r.Context(), org.ID, userID, string(auditOrgCreate), "organization", org.ID, meta); err != nil {
+		s.logger.Warn("audit org.create failed", "error", err, "org_id", org.ID)
+	}
+
 	writeJSON(w, http.StatusCreated, org)
 }
 
@@ -88,6 +99,11 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLog(r.Context(), auditAPIKeyCreate, "api_key", key.ID, map[string]any{
+		"name":   key.Name,
+		"prefix": key.KeyPrefix,
+	})
+
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"key":        key,
 		"secret_key": plaintext,
@@ -108,6 +124,8 @@ func (s *Server) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not revoke key"})
 		return
 	}
+
+	s.auditLog(r.Context(), auditAPIKeyRevoke, "api_key", keyID, nil)
 
 	w.WriteHeader(http.StatusNoContent)
 }

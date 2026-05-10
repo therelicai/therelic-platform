@@ -51,6 +51,12 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.auditLog(r.Context(), auditAgentRegister, "agent", req.Name, map[string]any{
+		"version":           req.Version,
+		"capabilities_hash": req.CapabilitiesHash,
+		"policy_hash":       req.PolicyHash,
+	})
+
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"status": "registered",
 		"name":   req.Name,
@@ -137,6 +143,13 @@ func (s *Server) handleUpdateAgentPolicy(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})
 		return
 	}
+
+	// Recording the size only, not the policy itself — policies often
+	// contain customer-sensitive target patterns we don't want in audit
+	// logs that may be exported.
+	s.auditLog(r.Context(), auditPolicyUpdate, "agent", name, map[string]any{
+		"policy_bytes": len(req.Policy),
+	})
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "updated",
