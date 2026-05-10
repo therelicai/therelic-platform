@@ -1,9 +1,11 @@
 # The Relic Platform — Technical Architecture
 
-> Private architecture documentation for the hosted platform (BSL 1.1 licensed).
-> Covers the control plane, governance agents, trust network, and enterprise extensions.
+> Architecture documentation for the control plane and governance worker.
+> Business Source License 1.1 (source-available). Covers the control
+> plane, governance agents, trust network, and enterprise extensions.
 >
-> The open-source mediation layer (Sections 0-9) is documented in `therelicai/therelic`.
+> The mediation layer (Sections 0-9) lives in `therelicai/therelic` under
+> Apache 2.0.
 
 ---
 
@@ -619,4 +621,4 @@ High-level overview of platform layers (detailed specifications in Sections 10�
 | Trust scoring | Trace-derived behavioral signals | Self-reported reputation | Behavioral data is unforgeable; self-reported scores are gameable |
 | Bilateral policies | Platform-generated templates | User-written from scratch | Users won't write cross-org policies manually; templates reduce friction |
 | Transaction settlement | Stripe Connect | Custom payment system | Don't build payment infrastructure |
-| License strategy | MIT for CLI + BSL for hosted platform | Full MIT or full BSL | MIT maximizes CLI adoption; BSL protects hosted revenue; split avoids both penalties |
+| License strategy | Apache 2.0 on runtime + website, BSL 1.1 on platform + app | All-Apache or all-BSL | Runtime needs OSS-grade adoption (procurement, distros, no CLA). Platform + app need protection from competing hosted clones. BSL Change License is Apache 2.0 — files convert four years post-publication. |

@@ -31,7 +31,7 @@ Cross-platform builds, integration tests, OpenClaw skill, policy hot-reload, doc
 
 | Week | Build | Done When |
 |---|---|---|
-| 11 | BSL 1.1 license, repo scaffold, Supabase project | Repo exists with license, go.mod, docker-compose |
+| 11 | BSL 1.1 license, repo scaffold, Supabase project | Repo exists with LICENSE (BSL 1.1), NOTICE, TRADEMARKS.md, go.mod, docker-compose |
 | 11-12 | Control Plane API (Go service) | POST/GET traces endpoints working. Auth via API keys. R2 storage. Postgres index. Agent registration. |
 | 12-13 | `relic trace push` (in `therelic`) | CLI uploads traces to control plane API. On missing API key, prints signup URL. |
 | 13-14 | Web UI — run list and trace viewer (`therelic-app`) | Browse runs, view trace events, filter by agent/env/denials. |

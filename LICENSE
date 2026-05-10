@@ -1,30 +1,52 @@
 Business Source License 1.1
 
-Licensor: The Relic AI, Inc.
+License text copyright (c) 2017 MariaDB Corporation Ab, All Rights Reserved.
+"Business Source License" is a trademark of MariaDB Corporation Ab.
 
-Licensed Work: The Relic Platform
-               The Licensed Work is (c) 2026 The Relic AI, Inc.
+Parameters
 
-Additional Use Grant: You may make use of the Licensed Work, provided that
-                      you do not use the Licensed Work for a Governance Service.
+Licensor:             The Relic AI, Inc.
+
+Licensed Work:        The Relic Platform
+                      The Licensed Work is (c) 2026 The Relic AI, Inc.
+
+Additional Use Grant: You may make use of the Licensed Work for any purpose,
+                      including production use, provided that you do not use
+                      the Licensed Work to offer a Governance Service.
 
                       A "Governance Service" is a commercial offering that
                       allows third parties to access the functionality of the
-                      Licensed Work by providing a hosted governance-as-a-service,
-                      agentic marketplace, or trust scoring platform that
-                      competes with The Relic Platform.
+                      Licensed Work as a hosted governance-as-a-service,
+                      agentic marketplace, trust-scoring platform, or any
+                      other service that substantially provides the
+                      functionality of the Licensed Work to third parties
+                      and competes with The Relic Platform offered by The
+                      Relic AI, Inc.
 
-Change Date: Four years from the date of each file's publication.
+                      For clarity, the following uses are permitted under
+                      this Additional Use Grant:
+                        (a) self-hosting the Licensed Work for your own
+                            organization's internal production use;
+                        (b) embedding the Licensed Work in a non-competing
+                            product or service offered to third parties,
+                            provided governance-as-a-service is not the
+                            substantive offering;
+                        (c) using the Licensed Work to govern your own
+                            agents in any environment, commercial or
+                            otherwise.
 
-Change License: MIT
+Change Date:          Four years from the date of each file's publication.
 
-For information about alternative licensing arrangements for the Licensed Work,
-please contact: licensing@therelic.dev
+Change License:       Apache License, Version 2.0
+
+For information about alternative licensing arrangements for the Licensed
+Work, please contact: licensing@therelic.dev
 
 Notice
 
-Business Source License 1.1 (BSL 1.1)
-https://mariadb.com/bsl11/
+Business Source License 1.1
+
+Terms
 
 The Licensor hereby grants you the right to copy, modify, create derivative
 works, redistribute, and make non-production use of the Licensed Work. The
@@ -65,3 +87,28 @@ AN "AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS,
 EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
 MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
 TITLE.
+
+MariaDB hereby grants you permission to use this License's text to license
+your works, and to refer to it using the trademark "Business Source License",
+as long as you comply with the Covenants of Licensor below.
+
+Covenants of Licensor
+
+In consideration of the right to use this License's text and the "Business
+Source License" name and trademark, Licensor covenants to MariaDB, and to all
+other recipients of the licensed work to be provided by Licensor:
+
+1. To specify as the Change License the GPL Version 2.0 or any later version,
+   or a license that is compatible with GPL Version 2.0 or a later version,
+   where "compatible" means that software provided under the Change License
+   can be included in a program with software provided under GPL Version 2.0
+   or a later version. Licensor may specify additional Change Licenses
+   without limitation.
+
+2. To either: (a) specify an additional grant of rights to use that does not
+   impose any additional restriction on the right granted in this License, as
+   the Additional Use Grant; or (b) insert the text "None".
+
+3. To specify a Change Date.
+
+4. Not to modify this License in any other way.

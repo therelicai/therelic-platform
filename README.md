@@ -4,7 +4,13 @@
 
 This is the server-side brain of the Relic ecosystem. It receives trace uploads from the open-source CLI, indexes them in Postgres, stores raw events in S3-compatible object storage, runs autonomous governance agents that detect policy gaps, and serves as the policy authority that agents pull from at runtime.
 
-> **License:** Business Source License 1.1 (BSL 1.1). Not open source.
+> **License:** Business Source License 1.1 (BSL 1.1). Source-available, not
+> OSI-open. Self-host for any purpose — internal production use is
+> explicitly permitted by the Additional Use Grant — but you may not run
+> a hosted Governance Service that competes with `api.therelic.dev`.
+> Each released file converts to Apache License 2.0 four years after
+> publication. See [LICENSE](./LICENSE), [NOTICE](./NOTICE), and
+> [TRADEMARKS.md](./TRADEMARKS.md).
 
 ---
 
@@ -12,7 +18,7 @@ This is the server-side brain of the Relic ecosystem. It receives trace uploads 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Open Source (MIT) — github.com/therelicai/therelic          │
+│  Open Source (Apache 2.0) — github.com/therelicai/therelic   │
 │                                                              │
 │  relic CLI / MCP Proxy / Policy Engine / Trace Writer        │
 │  Runs on the user's machine. Governs AI agent actions.       │
