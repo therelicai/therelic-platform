@@ -190,7 +190,11 @@ type Run struct {
 	StorageKey      string    `json:"-"`
 	ExpiresAt       time.Time `json:"expires_at"`
 	IntegrityChain  bool      `json:"integrity_chain"`
-	Truncated       bool      `json:"truncated"`
+	// ChainVerified is true only when the platform recomputed the
+	// HMAC chain end-to-end against its master secret. IntegrityChain
+	// is the client's claim; ChainVerified is the server's proof.
+	ChainVerified bool `json:"chain_verified"`
+	Truncated     bool `json:"truncated"`
 }
 
 // ErrRunAlreadyExists indicates an attempt to re-upload a run that's
@@ -202,11 +206,11 @@ func (p *Postgres) InsertRun(ctx context.Context, r *Run) error {
 	_, err := p.pool.Exec(ctx,
 		`INSERT INTO runs (id, org_id, agent_name, agent_version, policy_hash, environment,
 		  started_at, duration_ms, exit_code, actions_total, actions_allowed, actions_denied,
-		  storage_key, expires_at, integrity_chain, truncated)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		  storage_key, expires_at, integrity_chain, chain_verified, truncated)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		r.ID, r.OrgID, r.AgentName, r.AgentVersion, r.PolicyHash, r.Environment,
 		r.StartedAt, r.DurationMs, r.ExitCode, r.ActionsTotal, r.ActionsAllowed, r.ActionsDenied,
-		r.StorageKey, r.ExpiresAt, r.IntegrityChain, r.Truncated,
+		r.StorageKey, r.ExpiresAt, r.IntegrityChain, r.ChainVerified, r.Truncated,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -221,7 +225,7 @@ func (p *Postgres) InsertRun(ctx context.Context, r *Run) error {
 func (p *Postgres) ListRuns(ctx context.Context, orgID string, agentName string, limit, offset int) ([]Run, error) {
 	query := `SELECT id, org_id, agent_name, agent_version, policy_hash, environment,
 	           started_at, duration_ms, exit_code, actions_total, actions_allowed, actions_denied,
-	           storage_key, expires_at, integrity_chain, truncated
+	           storage_key, expires_at, integrity_chain, chain_verified, truncated
 	          FROM runs WHERE org_id = $1`
 	args := []any{orgID}
 	argIdx := 2
@@ -247,7 +251,7 @@ func (p *Postgres) ListRuns(ctx context.Context, orgID string, agentName string,
 		if err := rows.Scan(&r.ID, &r.OrgID, &r.AgentName, &r.AgentVersion, &r.PolicyHash,
 			&r.Environment, &r.StartedAt, &r.DurationMs, &r.ExitCode,
 			&r.ActionsTotal, &r.ActionsAllowed, &r.ActionsDenied, &r.StorageKey, &r.ExpiresAt,
-			&r.IntegrityChain, &r.Truncated); err != nil {
+			&r.IntegrityChain, &r.ChainVerified, &r.Truncated); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}
 		runs = append(runs, r)
@@ -260,12 +264,12 @@ func (p *Postgres) GetRun(ctx context.Context, orgID, runID string) (*Run, error
 	err := p.pool.QueryRow(ctx,
 		`SELECT id, org_id, agent_name, agent_version, policy_hash, environment,
 		  started_at, duration_ms, exit_code, actions_total, actions_allowed, actions_denied,
-		  storage_key, expires_at, integrity_chain, truncated
+		  storage_key, expires_at, integrity_chain, chain_verified, truncated
 		 FROM runs WHERE org_id = $1 AND id = $2`, orgID, runID,
 	).Scan(&r.ID, &r.OrgID, &r.AgentName, &r.AgentVersion, &r.PolicyHash,
 		&r.Environment, &r.StartedAt, &r.DurationMs, &r.ExitCode,
 		&r.ActionsTotal, &r.ActionsAllowed, &r.ActionsDenied, &r.StorageKey, &r.ExpiresAt,
-		&r.IntegrityChain, &r.Truncated)
+		&r.IntegrityChain, &r.ChainVerified, &r.Truncated)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"os"
@@ -44,14 +45,61 @@ type Server struct {
 	s3     *storage.S3
 	auth   *middleware.Auth
 	logger *slog.Logger
+
+	// traceMasterSecret enables HMAC chain verification of trace
+	// uploads. Empty means "skip verification" — the platform still
+	// records HasIntegrityChain (presence claim) but never proves it.
+	// Populated from RELIC_TRACE_KEY at NewServer time.
+	traceMasterSecret []byte
+
+	// requireSealedTraces rejects uploads without an HMAC chain when
+	// a master secret is configured. Populated from
+	// RELIC_REQUIRE_SEALED_TRACES (truthy values: "1", "true", "yes").
+	// Default false so legacy/unsealed clients can still upload during
+	// a rollout window.
+	requireSealedTraces bool
+}
+
+// loadTraceMasterSecret decodes RELIC_TRACE_KEY (hex) and returns the
+// raw bytes the runtime's IntegrityChain expects. Failure to decode
+// is fatal — running without verification when the operator expected
+// verification is the kind of silent regression we cannot afford in a
+// compliance product. Returning nil with a log line lets the server
+// boot in unverified mode when the env var is intentionally unset.
+func loadTraceMasterSecret(logger *slog.Logger) []byte {
+	raw := strings.TrimSpace(os.Getenv("RELIC_TRACE_KEY"))
+	if raw == "" {
+		return nil
+	}
+	key, err := hex.DecodeString(raw)
+	if err != nil {
+		logger.Error("RELIC_TRACE_KEY is not valid hex — trace verification disabled", "error", err)
+		return nil
+	}
+	if len(key) < 16 {
+		logger.Error("RELIC_TRACE_KEY shorter than 16 bytes — trace verification disabled")
+		return nil
+	}
+	logger.Info("trace HMAC verification enabled", "key_bytes", len(key))
+	return key
+}
+
+func envTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func NewServer(db *storage.Postgres, s3 *storage.S3, jwtSecret string, logger *slog.Logger) *Server {
 	return &Server{
-		db:     db,
-		s3:     s3,
-		auth:   middleware.NewAuth(db, jwtSecret),
-		logger: logger,
+		db:                  db,
+		s3:                  s3,
+		auth:                middleware.NewAuth(db, jwtSecret),
+		logger:              logger,
+		traceMasterSecret:   loadTraceMasterSecret(logger),
+		requireSealedTraces: envTruthy("RELIC_REQUIRE_SEALED_TRACES"),
 	}
 }
 

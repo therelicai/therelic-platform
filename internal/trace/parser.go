@@ -65,7 +65,16 @@ type Summary struct {
 
 	// HasIntegrityChain is true iff every action event carried an "hmac"
 	// field. Used to gate the "tamper-evident" badge on the dashboard.
+	// Presence-only: this says the trace *claims* tamper-evidence,
+	// not that the HMACs verify against the server's master secret.
 	HasIntegrityChain bool
+
+	// ChainVerified is true iff the platform recomputed every event's
+	// HMAC against the per-run key derived from the configured master
+	// secret. False when no master secret is configured OR when the
+	// trace simply doesn't carry a chain. True is the strong claim
+	// surfaced to compliance dashboards.
+	ChainVerified bool
 
 	// Truncated is set if the underlying stream ended mid-event or hit
 	// MaxEvents. The run is still indexable but flagged for the user.
@@ -84,10 +93,40 @@ var ErrMissingRunStart = errors.New("trace: missing run-start event")
 // ErrTooLarge is returned when a single line exceeds MaxEventSize.
 var ErrTooLarge = errors.New("trace: event exceeds maximum line size")
 
+// ErrChainBroken is returned when the master secret is configured and
+// the trace's HMAC chain doesn't verify. We surface this distinctly so
+// the API layer can return a 422 (semantic failure on a well-formed
+// upload) rather than a 400.
+var ErrChainBroken = errors.New("trace: HMAC chain failed verification")
+
+// ErrChainExpected is returned when the master secret is configured
+// but the trace carries no chain at all. Configurable separately from
+// ErrChainBroken because some deployments may accept unsealed traces
+// from legacy clients during rollout.
+var ErrChainExpected = errors.New("trace: chain expected but missing")
+
 // Parse reads a gzipped NDJSON trace from r and returns the derived
 // Summary. The reader is consumed entirely. The caller is responsible
 // for size-limiting the upstream (MaxBytesReader, etc).
+//
+// Parse does not cryptographically verify the HMAC chain — use
+// ParseAndVerify when the platform has the trace master secret.
 func Parse(r io.Reader) (*Summary, error) {
+	return parse(r, nil, false)
+}
+
+// ParseAndVerify is like Parse but additionally recomputes the HMAC
+// chain using a per-run key derived from masterSecret + runID. When
+// requireChain is true, traces without a chain are rejected with
+// ErrChainExpected; otherwise unsealed traces are accepted and
+// ChainVerified is left false.
+//
+// A masterSecret of nil or empty is equivalent to Parse.
+func ParseAndVerify(r io.Reader, masterSecret []byte, requireChain bool) (*Summary, error) {
+	return parse(r, masterSecret, requireChain)
+}
+
+func parse(r io.Reader, masterSecret []byte, requireChain bool) (*Summary, error) {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, fmt.Errorf("trace: gzip: %w", err)
@@ -101,6 +140,14 @@ func Parse(r io.Reader) (*Summary, error) {
 	scanner := bufio.NewScanner(gz)
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxEventSize)
 
+	// Capture sealed line bytes lazily — only when a master secret was
+	// supplied, since otherwise verification will never run and the
+	// buffer would just burn memory.
+	var sealedLines [][]byte
+	if len(masterSecret) > 0 {
+		sealedLines = make([][]byte, 0, 256)
+	}
+
 	sawAction := false
 	for scanner.Scan() {
 		if s.EventCount >= MaxEvents {
@@ -112,6 +159,13 @@ func Parse(r io.Reader) (*Summary, error) {
 			continue
 		}
 		s.EventCount++
+		if sealedLines != nil {
+			// scanner.Bytes() is owned by the scanner and overwritten
+			// on the next Scan(); we must copy if we want to keep it.
+			cp := make([]byte, len(line))
+			copy(cp, line)
+			sealedLines = append(sealedLines, cp)
+		}
 
 		var envelope map[string]json.RawMessage
 		if err := json.Unmarshal(line, &envelope); err != nil {
@@ -157,6 +211,28 @@ func Parse(r io.Reader) (*Summary, error) {
 	if s.StartedAt.IsZero() {
 		s.StartedAt = time.Now().UTC()
 	}
+
+	if len(masterSecret) > 0 {
+		switch {
+		case !s.HasIntegrityChain:
+			if requireChain {
+				return s, ErrChainExpected
+			}
+		case s.Truncated:
+			// A truncated trace can't be cleanly verified — the chain
+			// itself may be intact up to the truncation point but
+			// promising "verified" on a partial stream is misleading.
+			// We surface HasIntegrityChain so dashboards can show
+			// "claimed sealed, partial".
+		default:
+			perRunKey := generateChainKey(s.RunID, masterSecret)
+			if err := verifyChain(sealedLines, perRunKey); err != nil {
+				return s, fmt.Errorf("%w: %v", ErrChainBroken, err)
+			}
+			s.ChainVerified = true
+		}
+	}
+
 	return s, nil
 }
 

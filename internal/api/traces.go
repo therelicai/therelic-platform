@@ -53,7 +53,17 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summary, err := tracepkg.Parse(bytes.NewReader(body))
+	// Verification is opt-in. When RELIC_TRACE_KEY is unset the parser
+	// runs in presence-only mode (HasIntegrityChain is still set when
+	// every action event carried an hmac field), matching the
+	// pre-Slice-6 behavior. When the key is set, the parser
+	// cryptographically verifies the chain against a per-run key
+	// derived from the master secret + run id.
+	summary, err := tracepkg.ParseAndVerify(
+		bytes.NewReader(body),
+		s.traceMasterSecret,
+		s.requireSealedTraces,
+	)
 	if err != nil {
 		s.logger.Warn("trace parse failed", "org_id", orgID, "error", err)
 		switch {
@@ -63,6 +73,23 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "trace missing run-start event"})
 		case errors.Is(err, tracepkg.ErrTooLarge):
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "trace event line exceeds maximum"})
+		case errors.Is(err, tracepkg.ErrChainBroken):
+			// 422 Unprocessable Entity: the upload was syntactically
+			// fine but didn't pass the server's integrity policy. The
+			// audit trail records this attempt — surface as much as we
+			// know. summary is non-nil on this path (parser only
+			// returns ErrChainBroken after deriving RunID), but guard
+			// anyway so a future refactor can't silently panic.
+			runRef := ""
+			if summary != nil {
+				runRef = summary.RunID
+			}
+			s.auditLog(r.Context(), auditTraceUpload, "run", runRef, map[string]any{
+				"rejected": "chain_broken",
+			})
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "trace HMAC chain failed verification"})
+		case errors.Is(err, tracepkg.ErrChainExpected):
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "this platform requires sealed traces (RELIC_TRACE_KEY)"})
 		default:
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "trace is not valid gzipped NDJSON"})
 		}
@@ -109,6 +136,7 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 		StorageKey:     storageKey,
 		ExpiresAt:      expiresAt,
 		IntegrityChain: summary.HasIntegrityChain,
+		ChainVerified:  summary.ChainVerified,
 		Truncated:      summary.Truncated,
 	}
 
@@ -149,6 +177,7 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 		"actions_total":   summary.ActionsTotal,
 		"actions_denied":  summary.ActionsDenied,
 		"integrity_chain": summary.HasIntegrityChain,
+		"chain_verified":  summary.ChainVerified,
 	})
 
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -158,6 +187,7 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 		"actions_allowed": summary.ActionsAllowed,
 		"actions_denied":  summary.ActionsDenied,
 		"integrity_chain": summary.HasIntegrityChain,
+		"chain_verified":  summary.ChainVerified,
 		"truncated":       summary.Truncated,
 	})
 }
