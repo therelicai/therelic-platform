@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/oklog/ulid/v2"
 )
@@ -139,27 +141,43 @@ type Run struct {
 	ActionsTotal   int       `json:"actions_total"`
 	ActionsAllowed int       `json:"actions_allowed"`
 	ActionsDenied  int       `json:"actions_denied"`
-	StorageKey     string    `json:"storage_key"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	// StorageKey is the internal S3 path and is omitted from JSON
+	// responses so we don't leak the bucket layout to clients.
+	StorageKey      string    `json:"-"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	IntegrityChain  bool      `json:"integrity_chain"`
+	Truncated       bool      `json:"truncated"`
 }
+
+// ErrRunAlreadyExists indicates an attempt to re-upload a run that's
+// already indexed. Callers should treat this as idempotent and return the
+// existing row instead of double-charging or double-counting.
+var ErrRunAlreadyExists = errors.New("storage: run already exists")
 
 func (p *Postgres) InsertRun(ctx context.Context, r *Run) error {
 	_, err := p.pool.Exec(ctx,
 		`INSERT INTO runs (id, org_id, agent_name, agent_version, policy_hash, environment,
 		  started_at, duration_ms, exit_code, actions_total, actions_allowed, actions_denied,
-		  storage_key, expires_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		  storage_key, expires_at, integrity_chain, truncated)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		r.ID, r.OrgID, r.AgentName, r.AgentVersion, r.PolicyHash, r.Environment,
 		r.StartedAt, r.DurationMs, r.ExitCode, r.ActionsTotal, r.ActionsAllowed, r.ActionsDenied,
-		r.StorageKey, r.ExpiresAt,
+		r.StorageKey, r.ExpiresAt, r.IntegrityChain, r.Truncated,
 	)
-	return err
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrRunAlreadyExists
+		}
+		return err
+	}
+	return nil
 }
 
 func (p *Postgres) ListRuns(ctx context.Context, orgID string, agentName string, limit, offset int) ([]Run, error) {
 	query := `SELECT id, org_id, agent_name, agent_version, policy_hash, environment,
 	           started_at, duration_ms, exit_code, actions_total, actions_allowed, actions_denied,
-	           storage_key, expires_at
+	           storage_key, expires_at, integrity_chain, truncated
 	          FROM runs WHERE org_id = $1`
 	args := []any{orgID}
 	argIdx := 2
@@ -184,7 +202,8 @@ func (p *Postgres) ListRuns(ctx context.Context, orgID string, agentName string,
 		var r Run
 		if err := rows.Scan(&r.ID, &r.OrgID, &r.AgentName, &r.AgentVersion, &r.PolicyHash,
 			&r.Environment, &r.StartedAt, &r.DurationMs, &r.ExitCode,
-			&r.ActionsTotal, &r.ActionsAllowed, &r.ActionsDenied, &r.StorageKey, &r.ExpiresAt); err != nil {
+			&r.ActionsTotal, &r.ActionsAllowed, &r.ActionsDenied, &r.StorageKey, &r.ExpiresAt,
+			&r.IntegrityChain, &r.Truncated); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}
 		runs = append(runs, r)
@@ -197,11 +216,12 @@ func (p *Postgres) GetRun(ctx context.Context, orgID, runID string) (*Run, error
 	err := p.pool.QueryRow(ctx,
 		`SELECT id, org_id, agent_name, agent_version, policy_hash, environment,
 		  started_at, duration_ms, exit_code, actions_total, actions_allowed, actions_denied,
-		  storage_key, expires_at
+		  storage_key, expires_at, integrity_chain, truncated
 		 FROM runs WHERE org_id = $1 AND id = $2`, orgID, runID,
 	).Scan(&r.ID, &r.OrgID, &r.AgentName, &r.AgentVersion, &r.PolicyHash,
 		&r.Environment, &r.StartedAt, &r.DurationMs, &r.ExitCode,
-		&r.ActionsTotal, &r.ActionsAllowed, &r.ActionsDenied, &r.StorageKey, &r.ExpiresAt)
+		&r.ActionsTotal, &r.ActionsAllowed, &r.ActionsDenied, &r.StorageKey, &r.ExpiresAt,
+		&r.IntegrityChain, &r.Truncated)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

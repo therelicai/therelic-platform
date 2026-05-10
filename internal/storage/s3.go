@@ -39,21 +39,25 @@ func NewS3(endpoint, bucket, accessKey, secretKey, region string) (*S3, error) {
 	return &S3{client: client, bucket: bucket}, nil
 }
 
+// Upload streams data to S3. The caller is responsible for size-limiting
+// the reader before passing it in — we don't buffer the body here.
 func (s *S3) Upload(ctx context.Context, key string, data io.Reader) error {
-	buf, err := io.ReadAll(data)
-	if err != nil {
-		return fmt.Errorf("read upload data: %w", err)
-	}
-	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
-		Body:        bytes.NewReader(buf),
+		Body:        data,
 		ContentType: aws.String("application/gzip"),
 	})
 	if err != nil {
 		return fmt.Errorf("upload to S3: %w", err)
 	}
 	return nil
+}
+
+// UploadBytes is a convenience wrapper for in-memory payloads. The byte
+// slice must not be mutated until the call returns.
+func (s *S3) UploadBytes(ctx context.Context, key string, data []byte) error {
+	return s.Upload(ctx, key, bytes.NewReader(data))
 }
 
 func (s *S3) Download(ctx context.Context, key string) (io.ReadCloser, error) {
