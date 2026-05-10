@@ -2,12 +2,14 @@ package storage
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -82,21 +84,52 @@ type APIKey struct {
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
 }
 
+// hashAPIKeyPlain returns the legacy SHA-256(plaintext) hash. Kept as a
+// validation fallback so keys issued before slice 3 keep working.
+func hashAPIKeyPlain(plaintext string) string {
+	h := sha256.Sum256([]byte(plaintext))
+	return hex.EncodeToString(h[:])
+}
+
+// hashAPIKeyHMAC returns HMAC-SHA256(pepper, plaintext) hex-encoded.
+// The pepper comes from RELIC_API_KEY_PEPPER; if it's empty the caller
+// must fall back to the plain hash (we never silently weaken to plain
+// SHA-256 — that would erase the threat model).
+func hashAPIKeyHMAC(plaintext string, pepper []byte) string {
+	mac := hmac.New(sha256.New, pepper)
+	mac.Write([]byte(plaintext))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// apiKeyPepper returns the bytes of RELIC_API_KEY_PEPPER. Empty means
+// the operator opted out of upgraded hashing — CreateAPIKey will write
+// the legacy sha256 algorithm in that case.
+func apiKeyPepper() []byte {
+	return []byte(os.Getenv("RELIC_API_KEY_PEPPER"))
+}
+
 func (p *Postgres) CreateAPIKey(ctx context.Context, orgID, name string) (*APIKey, string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return nil, "", fmt.Errorf("generate key: %w", err)
 	}
 	plaintext := "rk_" + hex.EncodeToString(raw)
-	hash := sha256.Sum256([]byte(plaintext))
-	keyHash := hex.EncodeToString(hash[:])
 	prefix := plaintext[:10]
+
+	var keyHash, algo string
+	if pepper := apiKeyPepper(); len(pepper) > 0 {
+		keyHash = hashAPIKeyHMAC(plaintext, pepper)
+		algo = "hmac_sha256"
+	} else {
+		keyHash = hashAPIKeyPlain(plaintext)
+		algo = "sha256"
+	}
 
 	key := &APIKey{}
 	err := p.pool.QueryRow(ctx,
-		`INSERT INTO api_keys (org_id, key_hash, key_prefix, name) VALUES ($1, $2, $3, $4)
+		`INSERT INTO api_keys (org_id, key_hash, key_prefix, name, hash_algo) VALUES ($1, $2, $3, $4, $5)
 		 RETURNING id, org_id, key_prefix, name, created_at`,
-		orgID, keyHash, prefix, name,
+		orgID, keyHash, prefix, name, algo,
 	).Scan(&key.ID, &key.OrgID, &key.KeyPrefix, &key.Name, &key.CreatedAt)
 	if err != nil {
 		return nil, "", fmt.Errorf("create api key: %w", err)
@@ -104,11 +137,22 @@ func (p *Postgres) CreateAPIKey(ctx context.Context, orgID, name string) (*APIKe
 	return key, plaintext, nil
 }
 
+// ValidateAPIKey resolves a plaintext token to an org_id. We compute
+// both hash variants and look up either, so legacy keys (sha256) keep
+// working after RELIC_API_KEY_PEPPER is set and new keys can be
+// validated immediately. ANY = the hash_algo column distinguishes them
+// at the storage level but ValidateAPIKey treats them as interchangeable.
 func (p *Postgres) ValidateAPIKey(ctx context.Context, plaintext string) (orgID string, err error) {
-	hash := sha256.Sum256([]byte(plaintext))
-	keyHash := hex.EncodeToString(hash[:])
+	hashes := []string{hashAPIKeyPlain(plaintext)}
+	if pepper := apiKeyPepper(); len(pepper) > 0 {
+		hashes = append(hashes, hashAPIKeyHMAC(plaintext, pepper))
+	}
+
 	err = p.pool.QueryRow(ctx,
-		`SELECT org_id FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL`, keyHash,
+		`SELECT org_id FROM api_keys
+		   WHERE key_hash = ANY($1) AND revoked_at IS NULL
+		   LIMIT 1`,
+		hashes,
 	).Scan(&orgID)
 	if err == pgx.ErrNoRows {
 		return "", fmt.Errorf("invalid or revoked API key")
