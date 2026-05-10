@@ -9,6 +9,19 @@ import (
 	"github.com/therelicai/therelic-platform/internal/api/middleware"
 )
 
+// requireOrg extracts the request's org_id and writes a 403 if it's
+// empty. Returns the org_id and a bool indicating whether the caller
+// should proceed. Centralizing this prevents the empty-orgID -> blank
+// SQL filter -> cross-tenant data leak class of bug.
+func (s *Server) requireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if orgID == "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+		return "", false
+	}
+	return orgID, true
+}
+
 // auditAction is a typed constant for the `action` column of audit_events.
 // Centralizing the strings makes them easier to search and discourages
 // typo-driven drift across handlers.
@@ -71,9 +84,8 @@ func (s *Server) auditLog(
 }
 
 func (s *Server) handleListAuditEvents(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	if orgID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
 		return
 	}
 

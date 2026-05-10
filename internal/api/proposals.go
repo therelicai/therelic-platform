@@ -8,7 +8,10 @@ import (
 )
 
 func (s *Server) handleListProposals(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	status := r.URL.Query().Get("status")
 
 	proposals, err := s.db.ListProposals(r.Context(), orgID, status)
@@ -22,7 +25,10 @@ func (s *Server) handleListProposals(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetProposal(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	proposalID := chi.URLParam(r, "proposalID")
 
 	proposals, err := s.db.ListProposals(r.Context(), orgID, "")
@@ -58,9 +64,8 @@ func (s *Server) handleDismissProposal(w http.ResponseWriter, r *http.Request) {
 // the difference between a successful no-op and a typo) and writes an
 // audit row regardless of the verdict.
 func (s *Server) decideProposal(w http.ResponseWriter, r *http.Request, status string, action auditAction) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	if orgID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
 		return
 	}
 	userID := middleware.UserIDFromContext(r.Context())

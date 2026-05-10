@@ -353,11 +353,18 @@ func (p *Postgres) UpdateAgentPolicy(ctx context.Context, orgID, agentName, poli
 	return nil
 }
 
-func (p *Postgres) GetAgentBaseline(ctx context.Context, agentID string) (*AgentBaseline, error) {
+// GetAgentBaseline returns the most recent baseline for agentID, but
+// only if the agent belongs to orgID. The join into the agents table
+// is required even though the API handler already verified org
+// ownership — defense-in-depth catches future callers that forget.
+func (p *Postgres) GetAgentBaseline(ctx context.Context, orgID, agentID string) (*AgentBaseline, error) {
 	b := &AgentBaseline{}
 	err := p.pool.QueryRow(ctx,
-		`SELECT agent_id, computed_at, window_days, avg_actions_per_run, avg_denials_per_run, tool_distribution
-		 FROM agent_baselines WHERE agent_id = $1 ORDER BY computed_at DESC LIMIT 1`, agentID,
+		`SELECT b.agent_id, b.computed_at, b.window_days, b.avg_actions_per_run, b.avg_denials_per_run, b.tool_distribution
+		 FROM agent_baselines b
+		 INNER JOIN agents a ON a.id = b.agent_id
+		 WHERE b.agent_id = $1 AND a.org_id = $2
+		 ORDER BY b.computed_at DESC LIMIT 1`, agentID, orgID,
 	).Scan(&b.AgentID, &b.ComputedAt, &b.WindowDays, &b.AvgActionsPerRun, &b.AvgDenialsPerRun, &b.ToolDistribution)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -381,8 +388,12 @@ func (p *Postgres) InsertBaseline(ctx context.Context, baseline *AgentBaseline) 
 	return nil
 }
 
-func (p *Postgres) ComputeBaseline(ctx context.Context, agentID string, windowDays int) (*AgentBaseline, error) {
-	agent, err := p.GetAgentByID(ctx, agentID)
+// ComputeBaseline rolls up the last windowDays of runs for agentID
+// into an AgentBaseline row. The orgID parameter scopes the agent
+// lookup; passing the wrong org returns "agent not found" rather than
+// leaking the existence of an agent in another tenant.
+func (p *Postgres) ComputeBaseline(ctx context.Context, orgID, agentID string, windowDays int) (*AgentBaseline, error) {
+	agent, err := p.GetAgentByID(ctx, orgID, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("get agent: %w", err)
 	}
@@ -415,11 +426,15 @@ func (p *Postgres) ComputeBaseline(ctx context.Context, agentID string, windowDa
 	return baseline, nil
 }
 
-func (p *Postgres) GetAgentByID(ctx context.Context, agentID string) (*Agent, error) {
+// GetAgentByID returns the agent with the given id, scoped to orgID.
+// Returns nil if the agent doesn't exist or belongs to a different org —
+// callers cannot distinguish the two and that's intentional, mirroring
+// the not-found vs not-allowed conflation we want for tenant isolation.
+func (p *Postgres) GetAgentByID(ctx context.Context, orgID, agentID string) (*Agent, error) {
 	a := &Agent{}
 	err := p.pool.QueryRow(ctx,
 		`SELECT id, org_id, name, version, identity_manifest, capabilities_hash, policy_hash, registered_at, last_seen
-		 FROM agents WHERE id = $1`, agentID,
+		 FROM agents WHERE id = $1 AND org_id = $2`, agentID, orgID,
 	).Scan(&a.ID, &a.OrgID, &a.Name, &a.Version, &a.IdentityManifest,
 		&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen)
 	if err == pgx.ErrNoRows {
@@ -486,10 +501,16 @@ func (p *Postgres) ListOrgs(ctx context.Context) ([]string, error) {
 	return orgIDs, nil
 }
 
-func (p *Postgres) GetUserByID(ctx context.Context, userID string) (*User, error) {
+// GetUserByID returns the user with the given id, scoped to orgID.
+// A non-empty orgID is required — passing "" returns nil to prevent
+// cross-tenant smuggling via empty-string JWT claims.
+func (p *Postgres) GetUserByID(ctx context.Context, orgID, userID string) (*User, error) {
+	if orgID == "" || userID == "" {
+		return nil, nil
+	}
 	u := &User{}
 	err := p.pool.QueryRow(ctx,
-		`SELECT id, org_id, email, role, created_at FROM users WHERE id = $1`, userID,
+		`SELECT id, org_id, email, role, created_at FROM users WHERE id = $1 AND org_id = $2`, userID, orgID,
 	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -596,10 +617,16 @@ func (p *Postgres) CreateUser(ctx context.Context, orgID, email, role string) (*
 	return u, err
 }
 
-func (p *Postgres) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+// GetUserByEmail returns the user with the given email inside orgID.
+// Lookups by email are inherently cross-tenant if unscoped (a customer
+// at one org could enumerate users at another), so orgID is required.
+func (p *Postgres) GetUserByEmail(ctx context.Context, orgID, email string) (*User, error) {
+	if orgID == "" || email == "" {
+		return nil, nil
+	}
 	u := &User{}
 	err := p.pool.QueryRow(ctx,
-		`SELECT id, org_id, email, role, created_at FROM users WHERE email = $1`, email,
+		`SELECT id, org_id, email, role, created_at FROM users WHERE email = $1 AND org_id = $2`, email, orgID,
 	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil

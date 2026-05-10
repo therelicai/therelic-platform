@@ -6,12 +6,15 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/therelicai/therelic-platform/internal/api/middleware"
+
 	"github.com/therelicai/therelic-platform/internal/storage"
 )
 
 func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024))
 	if err != nil {
@@ -64,7 +67,10 @@ func (s *Server) handleRegisterAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 
 	agents, err := s.db.ListAgents(r.Context(), orgID)
 	if err != nil {
@@ -76,7 +82,10 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	name := chi.URLParam(r, "name")
 
 	agent, err := s.db.GetAgent(r.Context(), orgID, name)
@@ -93,7 +102,10 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetAgentPolicy(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	name := chi.URLParam(r, "name")
 
 	agent, err := s.db.GetAgent(r.Context(), orgID, name)
@@ -115,7 +127,10 @@ func (s *Server) handleGetAgentPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateAgentPolicy(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	name := chi.URLParam(r, "name")
 
 	agent, err := s.db.GetAgent(r.Context(), orgID, name)
@@ -157,7 +172,10 @@ func (s *Server) handleUpdateAgentPolicy(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleGetAgentBaseline(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
 	name := chi.URLParam(r, "name")
 
 	agent, err := s.db.GetAgent(r.Context(), orgID, name)
@@ -166,7 +184,7 @@ func (s *Server) handleGetAgentBaseline(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	baseline, err := s.db.GetAgentBaseline(r.Context(), agent.ID)
+	baseline, err := s.db.GetAgentBaseline(r.Context(), orgID, agent.ID)
 	if err != nil {
 		s.logger.Error("failed to get agent baseline", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database error"})

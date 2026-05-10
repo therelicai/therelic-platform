@@ -13,7 +13,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/therelicai/therelic-platform/internal/api/middleware"
 	"github.com/therelicai/therelic-platform/internal/storage"
 	tracepkg "github.com/therelicai/therelic-platform/internal/trace"
 )
@@ -43,9 +42,8 @@ func sanitizeIdentifier(s, fallback string) string {
 // core integrity guarantee: a client cannot lie about what happened
 // during a run.
 func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	if orgID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
 		return
 	}
 
@@ -165,9 +163,8 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListTraces(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	if orgID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
 		return
 	}
 	agentName := r.URL.Query().Get("agent")
@@ -191,9 +188,8 @@ func (s *Server) handleListTraces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTrace(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	if orgID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
 		return
 	}
 	runID := chi.URLParam(r, "runID")
@@ -212,9 +208,8 @@ func (s *Server) handleGetTrace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTraceEvents(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	if orgID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
 		return
 	}
 	runID := chi.URLParam(r, "runID")
@@ -243,9 +238,8 @@ func (s *Server) handleGetTraceEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteTrace(w http.ResponseWriter, r *http.Request) {
-	orgID := middleware.OrgIDFromContext(r.Context())
-	if orgID == "" {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "org_id required"})
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
 		return
 	}
 	runID := chi.URLParam(r, "runID")
