@@ -3,6 +3,8 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -11,6 +13,31 @@ import (
 	"github.com/therelicai/therelic-platform/internal/api/middleware"
 	"github.com/therelicai/therelic-platform/internal/storage"
 )
+
+// allowedOriginsFromEnv returns the CORS allow-list, honoring the
+// ALLOWED_ORIGINS env var (comma-separated). Falls back to the production +
+// local-dev defaults when the env var is unset or empty.
+func allowedOriginsFromEnv() []string {
+	defaults := []string{
+		"https://app.therelic.dev",
+		"http://localhost:5173",
+		"http://localhost:5174",
+	}
+	raw := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))
+	if raw == "" {
+		return defaults
+	}
+	var out []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			out = append(out, o)
+		}
+	}
+	if len(out) == 0 {
+		return defaults
+	}
+	return out
+}
 
 type Server struct {
 	db     *storage.Postgres
@@ -49,7 +76,7 @@ func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 
 	corsOpts := cors.Options{
-		AllowedOrigins:   []string{"https://app.therelic.dev", "http://localhost:5173", "http://localhost:5174"},
+		AllowedOrigins:   allowedOriginsFromEnv(),
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: true,
