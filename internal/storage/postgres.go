@@ -289,6 +289,76 @@ func (p *Postgres) DeleteRun(ctx context.Context, orgID, runID string) (storageK
 	return storageKey, err
 }
 
+// ExpiredRun is a thin tuple returned by ReapExpiredRuns — just enough
+// for the retention worker to issue the S3 delete and emit an audit
+// event. We deliberately don't return the full Run because the worker
+// has no need for action counts, timestamps, etc.
+type ExpiredRun struct {
+	ID         string
+	OrgID      string
+	StorageKey string
+}
+
+// ReapExpiredRuns atomically deletes up to `limit` runs whose
+// expires_at is older than `before` and returns their identifiers so
+// the caller can also delete the backing S3 objects.
+//
+// The query uses `FOR UPDATE SKIP LOCKED` on the inner select so
+// multiple retention workers running concurrently (HA control plane,
+// rolling deploys) don't fight over the same rows. The DELETE in the
+// outer statement only sees the rows the inner select locked, which
+// is what we want — anything another worker grabbed simultaneously
+// silently skips here.
+//
+// The DELETE happens before the S3 cleanup in the caller; if the S3
+// delete fails we leave an orphan object (logged + flagged for a
+// follow-up sweep) but the user can no longer reach it via the API.
+// We prefer that ordering over leaving DB rows pointing at deleted
+// objects, which would 500 the download endpoint.
+func (p *Postgres) ReapExpiredRuns(ctx context.Context, before time.Time, limit int) ([]ExpiredRun, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := p.pool.Query(ctx, `
+		DELETE FROM runs
+		WHERE id IN (
+		  SELECT id FROM runs
+		  WHERE expires_at < $1
+		  ORDER BY expires_at
+		  LIMIT $2
+		  FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, org_id, storage_key
+	`, before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("reap expired runs: %w", err)
+	}
+	defer rows.Close()
+	out := make([]ExpiredRun, 0, limit)
+	for rows.Next() {
+		var e ExpiredRun
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.StorageKey); err != nil {
+			return out, fmt.Errorf("scan expired run: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// CountExpiredRuns reports how many run rows are past their TTL right
+// now. Exposed for /readyz, /metrics, and operational dashboards;
+// running it on a hot path is cheap because expires_at is indexed.
+func (p *Postgres) CountExpiredRuns(ctx context.Context, before time.Time) (int, error) {
+	var n int
+	err := p.pool.QueryRow(ctx,
+		`SELECT count(*) FROM runs WHERE expires_at < $1`, before,
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count expired runs: %w", err)
+	}
+	return n, nil
+}
+
 // --- Agents ---
 
 type Agent struct {
