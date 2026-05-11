@@ -1,16 +1,81 @@
 # The Relic Platform
 
-**The hosted control plane for [The Relic](https://github.com/therelicai/therelic) — trace storage, governance agents, policy authority, and billing.**
+**The self-hostable control plane for [The Relic](https://github.com/therelicai/therelic) — trace storage, audit indexing, governance worker, and policy authority.**
 
-This is the server-side brain of the Relic ecosystem. It receives trace uploads from the open-source CLI, indexes them in Postgres, stores raw events in S3-compatible object storage, runs autonomous governance agents that detect policy gaps, and serves as the policy authority that agents pull from at runtime.
+This repo runs the server side of The Relic stack. Trace uploads land here, get parsed + verified, persist into Postgres (metadata) + S3 (raw events), and become queryable by the [therelic-app](https://github.com/therelicai/therelic-app) dashboard. The governance worker scans for policy gaps and proposes new rules for human review.
 
-> **License:** Business Source License 1.1 (BSL 1.1). Source-available, not
-> OSI-open. Self-host for any purpose — internal production use is
-> explicitly permitted by the Additional Use Grant — but you may not run
-> a hosted Governance Service that competes with `api.therelic.dev`.
+> **License:** Business Source License 1.1 (BSL 1.1). Source-available,
+> not OSI-open. Self-host for any purpose — internal production use is
+> explicitly permitted by the Additional Use Grant — but you may not
+> run a hosted Governance Service that competes with `api.therelic.dev`.
 > Each released file converts to Apache License 2.0 four years after
 > publication. See [LICENSE](./LICENSE), [NOTICE](./NOTICE), and
 > [TRADEMARKS.md](./TRADEMARKS.md).
+
+---
+
+## Quickstart — self-host the whole stack
+
+```bash
+# 1. Bring up Postgres, MinIO, run migrations, start relic-api.
+git clone https://github.com/therelicai/therelic-platform
+cd therelic-platform
+docker compose up -d
+
+# 2. (Optional but recommended) generate production secrets and
+#    restart so trace HMAC chain verification + peppered API key
+#    hashing are active.
+cp .env.example .env
+echo "RELIC_TRACE_KEY=$(openssl rand -hex 32)"      >> .env
+echo "RELIC_API_KEY_PEPPER=$(openssl rand -hex 32)" >> .env
+docker compose up -d --force-recreate relic-api
+
+# 3. Sanity check: /readyz returns 200 once Postgres + S3 are
+#    reachable.
+curl -fsS http://localhost:8080/readyz | jq
+
+# 4. From any shell with the relic CLI installed
+#    (https://github.com/therelicai/therelic#install):
+relic init
+export RELIC_API_URL=http://localhost:8080
+export RELIC_API_KEY=rk_dev_test_key_do_not_use_in_production
+export RELIC_TRACE_KEY=...   # same value as step 2 if you set one
+relic run --mode permissive -- python my_agent.py
+relic trace push             # uploads to relic-api
+```
+
+### Adding the dashboard
+
+The dashboard ([therelic-app](https://github.com/therelicai/therelic-app))
+is shipped as a separate repo and a separate compose overlay. Clone
+it next to this one and bring the whole stack up with one command:
+
+```bash
+git clone https://github.com/therelicai/therelic-app ../therelic-app
+docker compose -f docker-compose.yml -f docker-compose.app.yml up -d --build
+open http://localhost:5173
+```
+
+The compose stack is sized for a laptop. For production deployments
+see [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
+
+### Creating a real API key
+
+The dev key seeded by `docker compose up` is fine for localhost but
+should never escape your machine. To create a real one, hit the API
+with the dev key once:
+
+```bash
+curl -s -X POST http://localhost:8080/v1/orgs/00000000-0000-0000-0000-000000000001/api-keys \
+  -H "Authorization: Bearer rk_dev_test_key_do_not_use_in_production" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-key"}' | jq
+```
+
+The response includes the plaintext key once — store it. If you set
+`RELIC_API_KEY_PEPPER`, new keys are stored as `HMAC-SHA256(pepper,
+key)`; the legacy SHA-256 plain-hash path stays available for the
+seed key until you rotate it.
 
 ---
 
@@ -26,24 +91,24 @@ This is the server-side brain of the Relic ecosystem. It receives trace uploads 
                    │  HTTP (relic trace push, relic policy pull)
                    ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  This Repo — therelic-platform                               │
+│  This Repo — therelic-platform (BSL 1.1)                     │
 │                                                              │
-│  Control Plane API (Go) — accepts traces, distributes policy │
-│  Governance Worker — detects denial patterns, classifies     │
-│    intent with LLM, generates policy proposals               │
-│  Postgres — orgs, users, runs, agents, proposals, baselines  │
-│  S3/R2 — raw trace event storage (gzipped NDJSON)            │
-│  Stripe — billing and usage metering                         │
+│  relic-api          — HTTP control plane: trace ingest,      │
+│                       integrity verification, policy serve   │
+│  relic-governance   — Background worker: denial-pattern      │
+│                       detection, proposal generation         │
+│  Postgres           — orgs, users, runs, agents, proposals   │
+│  S3 / MinIO         — raw NDJSON trace events                │
 └──────────────────┬───────────────────────────────────────────┘
                    │  REST /v1/*
                    ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  therelic-app — React SPA dashboard                          │
-│  therelic-website — Marketing site (therelic.dev)             │
+│  therelic-app — React SPA dashboard (BSL 1.1)                │
+│  therelic-website — Marketing site (Apache 2.0)               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-The open-source CLI and the platform communicate **only over HTTP** — there is no shared Go import. The CLI works entirely standalone with local traces and local policy. The platform is an optional upgrade that adds cloud storage, team collaboration, governance automation, and the marketplace.
+The runtime and the platform communicate **only over HTTP** — there is no shared Go import. The CLI works entirely standalone with local traces and local policy. The platform is an optional upgrade that adds cloud storage, team collaboration, and governance automation.
 
 ---
 
@@ -73,10 +138,11 @@ Base: `https://api.therelic.dev/v1` — Auth via Bearer JWT (Supabase Auth) or o
 
 ### Middleware
 
-- **CORS** — Allows `app.therelic.dev`, `localhost:5173`, `localhost:5174`
+- **CORS** — Configurable via `ALLOWED_ORIGINS` (comma-separated)
 - **Rate limiting** — Token bucket per IP (10 req/s, burst 20)
-- **Auth** — JWT validation (Supabase) or API key hash lookup
-- **Request logging** — Structured JSON via `slog`
+- **Auth** — JWT validation (HS256, configurable issuer/audience) or API key HMAC-SHA256 lookup with server pepper
+- **Request logging** — Structured JSON via `slog`, includes `request_id` (also returned via `X-Request-ID`)
+- **Metrics** — `/metrics` (Prometheus) and `/readyz` (DB + S3 health)
 
 ### Governance Engine
 
@@ -90,9 +156,11 @@ Proposals appear in the dashboard for human review (approve/reject/dismiss).
 
 ### Database Schema
 
-7 migrations in `migrations/`:
+Migrations in `migrations/` are applied in order by the `migrate`
+compose service. A `schema_migrations` tracking table is used so
+re-running `docker compose up` is idempotent.
 
-| Migration | Tables |
+| Migration | Tables / change |
 |---|---|
 | 001 | `organizations`, `users`, `api_keys` |
 | 002 | `runs` (trace metadata index) |
@@ -101,6 +169,10 @@ Proposals appear in the dashboard for human review (approve/reject/dismiss).
 | 005 | `capability_listings`, `bilateral_agreements`, `transactions` |
 | 006 | Auth trigger (`handle_new_user`), `audit_events`, `invitations`, `updated_at` columns, API key scopes, agent policy storage |
 | 007 | Row-Level Security policies on all tables |
+| 008 | Run integrity columns (`integrity_chain`, `signed_envelope`) |
+| 009 | RLS completeness (`FORCE ROW LEVEL SECURITY` on all tenant tables) |
+| 010 | API key hash algorithm column (HMAC-SHA256 with pepper) |
+| 011 | `runs.chain_verified` for server-validated HMAC chain |
 
 ---
 
@@ -108,68 +180,99 @@ Proposals appear in the dashboard for human review (approve/reject/dismiss).
 
 ### Prerequisites
 
-- Go 1.23+
-- Docker (for local Postgres and MinIO)
-- A Supabase project (for auth)
+- Docker (and `docker compose`) — for the integrated stack
+- Go 1.23+ — only if you want to run the API directly without Docker
 
-### Setup
+### Run everything in Docker (recommended)
 
 ```bash
-# Start local services
-docker-compose up -d
+docker compose up -d
+docker compose logs -f relic-api    # follow API logs
+curl http://localhost:8080/readyz   # 200 once Postgres + MinIO are up
+```
 
-# Run migrations
-psql $DATABASE_URL < migrations/001_orgs_users_keys.sql
-psql $DATABASE_URL < migrations/002_runs.sql
-psql $DATABASE_URL < migrations/003_agents_baselines.sql
-psql $DATABASE_URL < migrations/004_proposals.sql
-psql $DATABASE_URL < migrations/005_trust_network.sql
-psql $DATABASE_URL < migrations/006_auth_sync_audit.sql
-psql $DATABASE_URL < migrations/007_rls_policies.sql
+This brings up Postgres (`:54322`), MinIO (`:9000`, console `:9001`),
+applies migrations once, creates the trace bucket, and starts
+`relic-api` on `:8080`. Re-running the same command is safe — the
+`schema_migrations` table tracks what's already been applied.
 
-# Start the API server
-DATABASE_URL="postgres://postgres:postgres@localhost:54322/postgres" \
-SUPABASE_JWT_SECRET="your-jwt-secret" \
+### Run the API outside Docker
+
+```bash
+docker compose up -d postgres minio minio-init migrate
+
+DATABASE_URL="postgres://relic:relic@localhost:54322/therelic?sslmode=disable" \
 S3_ENDPOINT="http://localhost:9000" \
-S3_BUCKET="traces" \
-S3_ACCESS_KEY="minioadmin" \
-S3_SECRET_KEY="minioadmin" \
+S3_BUCKET="relic-traces" \
+S3_ACCESS_KEY="relicminio" \
+S3_SECRET_KEY="relicminio" \
+S3_REGION="us-east-1" \
+ALLOWED_ORIGINS="http://localhost:5173,http://localhost:5174" \
 go run ./cmd/relic-api
+```
 
-# Start the governance worker (separate terminal)
-DATABASE_URL="postgres://postgres:postgres@localhost:54322/postgres" \
+The governance worker is a separate binary:
+
+```bash
+DATABASE_URL="postgres://relic:relic@localhost:54322/therelic?sslmode=disable" \
 ANTHROPIC_API_KEY="sk-ant-..." \
 S3_ENDPOINT="http://localhost:9000" \
-S3_BUCKET="traces" \
-S3_ACCESS_KEY="minioadmin" \
-S3_SECRET_KEY="minioadmin" \
+S3_BUCKET="relic-traces" \
+S3_ACCESS_KEY="relicminio" \
+S3_SECRET_KEY="relicminio" \
 go run ./cmd/relic-governance
 ```
 
 ### Environment Variables
 
-| Variable | Required | Description |
+#### Required
+
+| Variable | Description |
+|---|---|
+| `DATABASE_URL` | Postgres connection string |
+| `S3_ENDPOINT` | S3-compatible endpoint (MinIO, Cloudflare R2, AWS) |
+| `S3_BUCKET` | Bucket name for trace storage |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | S3 credentials |
+
+#### Strongly recommended for production
+
+| Variable | Description |
+|---|---|
+| `SUPABASE_JWT_SECRET` | JWT secret for HS256 dashboard auth |
+| `RELIC_JWT_ISSUER` / `RELIC_JWT_AUDIENCE` | Expected JWT `iss` / `aud` claims |
+| `RELIC_API_KEY_PEPPER` | Server-side pepper for HMAC-SHA256 API key hashing (Slice 3) |
+| `RELIC_TRACE_KEY` | 32-byte hex master secret enabling server-side HMAC chain verification (Slice 6) |
+| `RELIC_REQUIRE_SEALED_TRACES` | `1` to reject uploads missing an HMAC chain |
+| `ALLOWED_ORIGINS` | Comma-separated CORS origin allowlist |
+
+#### Operational tuning
+
+| Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | Yes | Postgres connection string |
-| `SUPABASE_JWT_SECRET` | Yes | JWT secret from Supabase dashboard |
-| `PORT` | No | API port (default: 8080) |
-| `S3_ENDPOINT` | Yes | S3-compatible endpoint (Cloudflare R2, MinIO) |
-| `S3_BUCKET` | Yes | Bucket name for trace storage |
-| `S3_ACCESS_KEY` | Yes | S3 access key |
-| `S3_SECRET_KEY` | Yes | S3 secret key |
-| `S3_REGION` | No | S3 region (default: auto) |
-| `ANTHROPIC_API_KEY` | No | Enables LLM-powered intent classification |
-| `STRIPE_SECRET_KEY` | No | Enables billing features |
+| `PORT` | `8080` | API port |
+| `S3_REGION` | `auto` | S3 region |
+| `RELIC_PG_MAX_CONNS` | `20` | pgxpool max connections |
+| `RELIC_PG_MIN_CONNS` | `2` | pgxpool min connections |
+| `RELIC_PG_MAX_LIFETIME` | `30m` | Connection lifetime |
+| `RELIC_PG_MAX_IDLE_TIME` | `5m` | Idle connection timeout |
+| `RELIC_RETENTION_DISABLED` | unset | Set to `1` to skip the retention sweeper |
+| `RELIC_RETENTION_INTERVAL` | `15m` | Retention worker sweep interval |
+| `RELIC_RETENTION_BATCH` | `100` | Max runs reaped per sweep |
+| `ANTHROPIC_API_KEY` | — | Enables LLM-powered intent classification (governance worker) |
+
+### Observability
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /readyz` | Returns 200 once Postgres + S3 are reachable; 503 otherwise |
+| `GET /metrics` | Prometheus exposition: HTTP, trace uploads, retention sweeps, DB pool stats |
 
 ### Deployment
 
-Configured for Fly.io — see `fly.toml` and `docs/DEPLOYMENT.md`.
-
-```bash
-fly launch --name therelic-api --region iad
-fly secrets set DATABASE_URL="..." SUPABASE_JWT_SECRET="..."
-fly deploy
-```
+For Fly.io see `fly.toml` and `docs/DEPLOYMENT.md`. For any other
+container host, the included `Dockerfile` is single-stage-Alpine and
+~30 MB — drop it on Render, Railway, Cloud Run, ECS, or your own
+Kubernetes cluster.
 
 ---
 
@@ -183,9 +286,11 @@ internal/
   api/                 # HTTP handlers, middleware, routing
     middleware/         # Auth, rate limiting
   governance/          # Worker, detector, classifier, proposer
-  billing/             # Stripe integration, usage metering
+  metrics/             # Prometheus instrumentation
+  retention/           # Background sweeper for expired traces
   storage/             # Postgres and S3 clients
-migrations/            # SQL migration files (001-007)
+  trace/               # Server-side NDJSON parser + HMAC verifier
+migrations/            # SQL migration files
 docs/                  # Architecture, deployment, development guides
 ```
 

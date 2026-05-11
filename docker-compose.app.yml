@@ -1,0 +1,28 @@
+# Overlay that adds the therelic-app dashboard to the stack.
+#
+# Use when you have ../therelic-app checked out alongside this repo:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.app.yml \
+#     up -d --build
+#
+# The app is built from source (Vite -> nginx static serve) and
+# proxies /v1/* to the relic-api service. It listens on host port
+# 5173 by default; override APP_PORT if that's taken.
+
+services:
+  relic-app:
+    build:
+      context: ../therelic-app
+      dockerfile: Dockerfile
+    ports:
+      - "${APP_PORT:-5173}:80"
+    depends_on:
+      relic-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10

@@ -1,46 +1,195 @@
+# Self-host docker-compose for The Relic.
+#
+# `docker compose up` brings up the full local stack:
+#
+#   postgres   — primary store. Migrations are applied on boot by the
+#                `migrate` one-shot service before the API starts.
+#   minio      — S3-compatible trace storage. The bucket is created by
+#                the `minio-init` one-shot.
+#   relic-api  — HTTP control plane (this repo's cmd/relic-api).
+#
+# All defaults are oriented at "works on my laptop without editing
+# anything". Production deployments should override:
+#
+#   POSTGRES_PASSWORD        — pick a real one
+#   MINIO_ROOT_PASSWORD      — same
+#   SUPABASE_JWT_SECRET      — sourced from your Supabase project
+#   RELIC_TRACE_KEY          — 32-byte hex master secret for HMAC chain
+#                              verification (Slice 6); generate via
+#                              `openssl rand -hex 32`
+#   ALLOWED_ORIGINS          — wherever therelic-app is hosted
+#
+# The `auth.users` stub created by migrate is a Supabase-isms shim;
+# migration 006 references that schema and we don't run Supabase
+# Auth here, so we just create the table empty.
+
 services:
-  db:
-    image: supabase/postgres:15.6.1.143
+  postgres:
+    image: postgres:16-alpine
     ports:
-      - "54322:5432"
+      - "${POSTGRES_PORT:-54322}:5432"
     environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: therelic
+      POSTGRES_USER: ${POSTGRES_USER:-relic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relic}
+      POSTGRES_DB: ${POSTGRES_DB:-therelic}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-relic} -d ${POSTGRES_DB:-therelic}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
-  api:
-    build: .
-    ports:
-      - "8080:8080"
-    environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/therelic?sslmode=disable
-      S3_ENDPOINT: http://minio:9000
-      S3_BUCKET: traces
-      S3_ACCESS_KEY: minioadmin
-      S3_SECRET_KEY: minioadmin
-      PORT: "8080"
-      SUPABASE_JWT_SECRET: super-secret-jwt-token-for-dev
+  # Apply every SQL file in migrations/ in order. Idempotent — the
+  # migrations are written with `IF NOT EXISTS` / `IF NOT EXISTS`
+  # guards where it matters, so re-running on an existing volume is
+  # a no-op.
+  migrate:
+    image: postgres:16-alpine
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-relic}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-relic}
+      PGDATABASE: ${POSTGRES_DB:-therelic}
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "==> creating auth.users stub for migration 006";
+        psql -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS auth;" \
+                                -c "CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY, email TEXT);";
+        echo "==> ensuring schema_migrations tracking table";
+        psql -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());";
+        for f in /migrations/*.sql; do
+          name=$$(basename "$$f");
+          already=$$(psql -tA -c "SELECT 1 FROM schema_migrations WHERE filename = '$$name'");
+          if [ "$$already" = "1" ]; then
+            echo "==> $$name (already applied)";
+            continue;
+          fi
+          echo "==> $$name";
+          psql -v ON_ERROR_STOP=1 -f "$$f";
+          psql -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations (filename) VALUES ('$$name');";
+        done
+        echo "==> migrations complete";
+
+  # One-shot seeder that creates a dev organization + API key when
+  # the database is fresh. Idempotent — guarded by an existence
+  # check so a second `docker compose up` is a no-op. The dev key
+  # is `rk_dev_test_key_do_not_use_in_production` — fine for
+  # laptops, never appropriate for anything network-exposed.
+  seed:
+    image: postgres:16-alpine
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGUSER: ${POSTGRES_USER:-relic}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-relic}
+      PGDATABASE: ${POSTGRES_DB:-therelic}
+    volumes:
+      - ./supabase/seed.sql:/seed.sql:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        already=$$(psql -tA -c "SELECT 1 FROM organizations WHERE id = '00000000-0000-0000-0000-000000000001'");
+        if [ "$$already" = "1" ]; then
+          echo "==> dev seed already present, skipping";
+          exit 0;
+        fi
+        echo "==> seeding dev org + API key";
+        psql -v ON_ERROR_STOP=1 -f /seed.sql;
+        echo "";
+        echo "----------------------------------------------------";
+        echo "  Dev API key: rk_dev_test_key_do_not_use_in_production";
+        echo "  Org ID:      00000000-0000-0000-0000-000000000001";
+        echo "  Hash algo:   sha256 (legacy compat)";
+        echo "----------------------------------------------------";
 
   minio:
     image: minio/minio:latest
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-relicminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-relicminio}
     command: server /data --console-address ":9001"
     volumes:
       - miniodata:/data
+    healthcheck:
+      # MinIO's /minio/health/live is the lightweight liveness check;
+      # /ready needs configured drives which doesn't add value here.
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Create the traces bucket if it doesn't already exist. Without
+  # this, the first relic-api upload would 404 with NoSuchBucket and
+  # the user would have to learn the mc CLI to fix it.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-relicminio} ${MINIO_ROOT_PASSWORD:-relicminio};
+        mc mb --ignore-existing local/${S3_BUCKET:-relic-traces};
+        echo "==> bucket ${S3_BUCKET:-relic-traces} ready";
+
+  relic-api:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://${POSTGRES_USER:-relic}:${POSTGRES_PASSWORD:-relic}@postgres:5432/${POSTGRES_DB:-therelic}?sslmode=disable
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-relic-traces}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-relicminio}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-relicminio}
+      S3_REGION: us-east-1
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-dev-only-jwt-secret-do-not-use-in-production}
+      # Allows the local therelic-app dev server (vite) and the
+      # built static SPA. Override for any other origin.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:5174,http://localhost:4173}
+      # Slice 6: when RELIC_TRACE_KEY is set, the platform recomputes
+      # the HMAC chain on every upload. Default-blank means presence-
+      # only mode (the dashboard still shows the integrity badge but
+      # the server doesn't cryptographically verify).
+      RELIC_TRACE_KEY: ${RELIC_TRACE_KEY:-}
+      # Slice 3: API key hashing pepper. Mandatory for new deploys;
+      # falls back to the legacy plain SHA-256 hash when blank so
+      # existing keys still work during rollout.
+      RELIC_API_KEY_PEPPER: ${RELIC_API_KEY_PEPPER:-}
+      # Slice 8 pool tuning. Sensible defaults for a small deploy.
+      RELIC_PG_MAX_CONNS: ${RELIC_PG_MAX_CONNS:-20}
+      RELIC_PG_MIN_CONNS: ${RELIC_PG_MIN_CONNS:-2}
 
 volumes:
   pgdata:
