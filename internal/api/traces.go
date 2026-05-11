@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/therelicai/therelic-platform/internal/metrics"
 	"github.com/therelicai/therelic-platform/internal/storage"
 	tracepkg "github.com/therelicai/therelic-platform/internal/trace"
 )
@@ -66,20 +67,23 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		s.logger.Warn("trace parse failed", "org_id", orgID, "error", err)
+		// Outcome label is fine-grained because the failure modes
+		// here are the ones we genuinely want to alert on (a spike
+		// in chain_broken would be a security incident; a spike in
+		// not_gzip is probably a misconfigured client).
+		outcome := "parse_failed"
 		switch {
 		case errors.Is(err, tracepkg.ErrEmptyTrace):
+			outcome = "empty"
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "trace contains no events"})
 		case errors.Is(err, tracepkg.ErrMissingRunStart):
+			outcome = "missing_run_start"
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "trace missing run-start event"})
 		case errors.Is(err, tracepkg.ErrTooLarge):
+			outcome = "too_large"
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "trace event line exceeds maximum"})
 		case errors.Is(err, tracepkg.ErrChainBroken):
-			// 422 Unprocessable Entity: the upload was syntactically
-			// fine but didn't pass the server's integrity policy. The
-			// audit trail records this attempt — surface as much as we
-			// know. summary is non-nil on this path (parser only
-			// returns ErrChainBroken after deriving RunID), but guard
-			// anyway so a future refactor can't silently panic.
+			outcome = "chain_broken"
 			runRef := ""
 			if summary != nil {
 				runRef = summary.RunID
@@ -89,10 +93,12 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 			})
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "trace HMAC chain failed verification"})
 		case errors.Is(err, tracepkg.ErrChainExpected):
+			outcome = "chain_expected"
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "this platform requires sealed traces (RELIC_TRACE_KEY)"})
 		default:
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "trace is not valid gzipped NDJSON"})
 		}
+		metrics.TraceUploads.WithLabelValues(outcome).Inc()
 		return
 	}
 
@@ -179,6 +185,7 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 		"integrity_chain": summary.HasIntegrityChain,
 		"chain_verified":  summary.ChainVerified,
 	})
+	metrics.TraceUploads.WithLabelValues("accepted").Inc()
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"run_id":          runID,

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/therelicai/therelic-platform/internal/api"
@@ -61,5 +62,29 @@ func TestUnauthorized(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("GET /v1/traces without auth: want status 401, got %d", rec.Code)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	handler := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics: want 200, got %d", rec.Code)
+	}
+	// /metrics should contain at least one of our namespaced metrics.
+	if !strings.Contains(rec.Body.String(), "relic_api_") {
+		t.Errorf("GET /metrics: body should contain relic_api_ metrics, got:\n%s", rec.Body.String())
+	}
+}
+
+func TestRequestIDHeader(t *testing.T) {
+	handler := setupTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if got := rec.Header().Get("X-Request-ID"); got == "" {
+		t.Error("expected X-Request-ID response header to be set")
 	}
 }

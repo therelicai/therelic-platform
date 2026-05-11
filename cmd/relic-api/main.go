@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/therelicai/therelic-platform/internal/api"
+	"github.com/therelicai/therelic-platform/internal/metrics"
 	"github.com/therelicai/therelic-platform/internal/retention"
 	"github.com/therelicai/therelic-platform/internal/storage"
 )
@@ -31,12 +32,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	db, err := storage.NewPostgres(context.Background(), dbURL)
+	poolCfg := storage.PoolConfig{
+		MaxConns:        int32(intEnv("RELIC_PG_MAX_CONNS", 20)),
+		MinConns:        int32(intEnv("RELIC_PG_MIN_CONNS", 2)),
+		MaxConnLifetime: durationEnv("RELIC_PG_MAX_LIFETIME", 30*time.Minute),
+		MaxConnIdleTime: durationEnv("RELIC_PG_MAX_IDLE_TIME", 5*time.Minute),
+	}
+	db, err := storage.NewPostgresWith(context.Background(), dbURL, poolCfg)
 	if err != nil {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
+
+	// Wire pool stats into Prometheus. Without this the
+	// relic_api_db_pool_* gauges always read zero.
+	metrics.SetDBPoolProvider(func() metrics.DBPoolStats {
+		s := db.Stats()
+		return metrics.DBPoolStats{
+			Acquired: s.Acquired,
+			Idle:     s.Idle,
+			Max:      s.Max,
+		}
+	})
 
 	s3Client, err := storage.NewS3(
 		os.Getenv("S3_ENDPOINT"),
@@ -76,6 +94,16 @@ func main() {
 			BatchSize: intEnv("RELIC_RETENTION_BATCH", retention.DefaultBatchSize),
 		}
 		worker := retention.New(db, s3Client, logger, retentionCfg)
+		metrics.SetRetentionProvider(func() metrics.RetentionStats {
+			s := worker.Stats()
+			return metrics.RetentionStats{
+				SweepsCompleted: s.SweepsCompleted,
+				RowsDeleted:     s.RowsDeleted,
+				RowsDBFailures:  s.RowsDBFailures,
+				RowsS3Failures:  s.RowsS3Failures,
+				LastRunAt:       s.LastRunAt,
+			}
+		})
 		go worker.Run(rootCtx)
 	} else {
 		slog.Info("retention worker disabled via RELIC_RETENTION_DISABLED")

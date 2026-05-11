@@ -78,3 +78,15 @@ func (s *S3) Delete(ctx context.Context, key string) error {
 	})
 	return err
 }
+
+// Ping verifies the bucket exists and credentials work. Used by
+// /readyz so the deploy fails fast on misconfiguration rather than
+// emitting NoSuchBucket on the first user upload. HeadBucket also
+// returns 403 for a wrong-credential scenario, which is the other
+// boot-time failure we want to catch.
+func (s *S3) Ping(ctx context.Context) error {
+	_, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(s.bucket),
+	})
+	return err
+}

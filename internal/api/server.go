@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +14,7 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/therelicai/therelic-platform/internal/api/middleware"
+	"github.com/therelicai/therelic-platform/internal/metrics"
 	"github.com/therelicai/therelic-platform/internal/storage"
 )
 
@@ -103,21 +106,94 @@ func NewServer(db *storage.Postgres, s3 *storage.S3, jwtSecret string, logger *s
 	}
 }
 
+// requestLogger emits a single structured log line per request and
+// records the Prometheus counters/histograms. We capture the chi
+// RoutePattern (e.g. "/v1/traces/{runID}") rather than the raw URL
+// path so the histogram label set stays bounded — recording one
+// metric per run ID would blow up cardinality on a busy deploy.
+//
+// The request_id pulled from chimw.RequestID lands in the log line
+// AND is echoed in the X-Request-ID response header for client-side
+// log correlation. Operators looking at a stack trace can grep the
+// API logs for the same id.
 func (s *Server) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ww := chimw.NewWrapResponseWriter(w, r.ProtoMajor)
+		reqID := chimw.GetReqID(r.Context())
+		if reqID != "" {
+			ww.Header().Set("X-Request-ID", reqID)
+		}
 		defer func() {
+			route := chi.RouteContext(r.Context()).RoutePattern()
+			if route == "" {
+				// Unmatched routes (404) fall back to a constant so
+				// scanners hitting /admin.php don't generate one
+				// metric per probed path.
+				route = "unknown"
+			}
+			duration := time.Since(start)
+			metrics.ObserveRequest(r.Method, route, ww.Status(), duration)
 			s.logger.Info("request",
+				"request_id", reqID,
 				"method", r.Method,
 				"path", r.URL.Path,
+				"route", route,
 				"status", ww.Status(),
 				"bytes", ww.BytesWritten(),
-				"duration_ms", time.Since(start).Milliseconds(),
+				"duration_ms", duration.Milliseconds(),
 			)
 		}()
 		next.ServeHTTP(ww, r)
 	})
+}
+
+// handleReadyz reports whether the API can actually do its job: DB
+// reachable and S3 bucket reachable. /health stays a cheap liveness
+// probe (process is up); /readyz is the gate the load balancer or
+// orchestrator should use to decide if this replica receives
+// traffic.
+//
+// We use a short context timeout so a slow DB doesn't keep the
+// readyz handler hanging forever — the orchestrator's own timeout
+// would fire instead, but the explicit deadline makes the failure
+// mode crisper in logs.
+func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	type checkResult struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	body := map[string]any{
+		"status": "ok",
+		"checks": map[string]checkResult{},
+	}
+	checks := body["checks"].(map[string]checkResult)
+	allOK := true
+
+	if err := s.db.Ping(ctx); err != nil {
+		checks["db"] = checkResult{Status: "fail", Error: err.Error()}
+		allOK = false
+	} else {
+		checks["db"] = checkResult{Status: "ok"}
+	}
+	if err := s.s3.Ping(ctx); err != nil {
+		checks["s3"] = checkResult{Status: "fail", Error: err.Error()}
+		allOK = false
+	} else {
+		checks["s3"] = checkResult{Status: "ok"}
+	}
+
+	status := http.StatusOK
+	if !allOK {
+		body["status"] = "degraded"
+		status = http.StatusServiceUnavailable
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) Router() http.Handler {
@@ -131,18 +207,28 @@ func (s *Server) Router() http.Handler {
 		MaxAge:           300,
 	}
 
+	// RequestID must run BEFORE requestLogger so the logger can read
+	// the id from the context. Recoverer must run after so panic
+	// recovery sees an annotated context.
+	r.Use(chimw.RequestID)
 	r.Use(cors.Handler(corsOpts))
 	r.Use(middleware.NewRateLimiter(10, 20).Middleware)
 	r.Use(s.requestLogger)
-	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Compress(5))
 
+	// Cheap liveness probe — the process is up and the router can
+	// serve. Distinct from /readyz, which checks downstream deps.
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	})
+	r.Get("/readyz", s.handleReadyz)
+	// /metrics is intentionally outside /v1 so it bypasses the auth
+	// middleware. Operators are expected to either firewall the port
+	// or front the API with an ingress that strips/adds basic-auth.
+	r.Handle("/metrics", metrics.Handler())
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(s.auth.Middleware)

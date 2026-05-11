@@ -22,8 +22,46 @@ type Postgres struct {
 	pool *pgxpool.Pool
 }
 
+// PoolConfig controls the pgxpool we construct. Each field maps onto a
+// MaxConns / MinConns / *Lifetime knob — zero values fall back to
+// pgxpool's defaults, which are surprisingly conservative for an API
+// server (max 4 conns). Real deployments will want to tune at least
+// MaxConns.
+type PoolConfig struct {
+	MaxConns        int32
+	MinConns        int32
+	MaxConnLifetime time.Duration
+	MaxConnIdleTime time.Duration
+}
+
+// NewPostgres connects with pgxpool's defaults. Existing callers
+// preserve their behavior; new callers should prefer NewPostgresWith.
 func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	return NewPostgresWith(ctx, databaseURL, PoolConfig{})
+}
+
+// NewPostgresWith connects with explicit pool tuning. Defaults are
+// applied for any zero field. We still Ping before returning so an
+// unreachable database fails loudly at boot rather than silently at
+// first request.
+func NewPostgresWith(ctx context.Context, databaseURL string, pc PoolConfig) (*Postgres, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse postgres dsn: %w", err)
+	}
+	if pc.MaxConns > 0 {
+		cfg.MaxConns = pc.MaxConns
+	}
+	if pc.MinConns > 0 {
+		cfg.MinConns = pc.MinConns
+	}
+	if pc.MaxConnLifetime > 0 {
+		cfg.MaxConnLifetime = pc.MaxConnLifetime
+	}
+	if pc.MaxConnIdleTime > 0 {
+		cfg.MaxConnIdleTime = pc.MaxConnIdleTime
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
@@ -35,6 +73,32 @@ func NewPostgres(ctx context.Context, databaseURL string) (*Postgres, error) {
 
 func (p *Postgres) Close() {
 	p.pool.Close()
+}
+
+// Ping checks the pool can reach the database. Used by /readyz.
+func (p *Postgres) Ping(ctx context.Context) error {
+	return p.pool.Ping(ctx)
+}
+
+// PoolStat is a snapshot of pgxpool counters. Exposed for /metrics so
+// operators can see when the API server is saturating its DB pool.
+type PoolStat struct {
+	Acquired    int32
+	Idle        int32
+	Max         int32
+	Total       int32
+	Constructing int32
+}
+
+func (p *Postgres) Stats() PoolStat {
+	s := p.pool.Stat()
+	return PoolStat{
+		Acquired:     s.AcquiredConns(),
+		Idle:         s.IdleConns(),
+		Max:          s.MaxConns(),
+		Total:        s.TotalConns(),
+		Constructing: s.ConstructingConns(),
+	}
 }
 
 // --- Organizations ---
