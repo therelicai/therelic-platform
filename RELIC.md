@@ -42,6 +42,7 @@ a first-class supported configuration.
 | **Replay & diff badge** ("test every rule against your real history before you ship it") | **slice 13** | platform endpoints `POST /v1/policy/simulate` + `GET /v1/policy/simulate/:job_id`; app diff badge in the policy editor |
 | **Live observability** ("every agent in your org, acting in real time") | **slice 14b** | runtime emits `IntentEvent` + streams via `POST /v1/intents`; platform fans out via Postgres LISTEN/NOTIFY; app reads from `GET /v1/orgs/:id/live` SSE |
 | **`agents.last_seen` correctness** (Online pill reflects activity, not just registration) | **slice 14a** | `handleUploadTrace` + `handlePostIntent` both update `last_seen` |
+| **Universal policy** ("one policy change applies to the labeled set within seconds") | **slice 15** | `policy_sets` + `agent_labels` tables; `POST /v1/policy_sets`, `POST /v1/agents/:name/labels`, agent-facing `GET /v1/agents/:name/policy_updates` (SSE), `POST /v1/agents/:name/policy_applied`; runtime subscribes on startup when `--watch` + API creds; in-flight Evaluate + HMAC chain key invariants preserved across hot reload |
 
 ---
 
@@ -52,18 +53,23 @@ agent name — even when the selector resolves to a single agent today. This
 is forward-compatible with slice 15's label-match grammar.
 
 ```json
-// Slice 13: only the single-agent form is valid.
+// Single-agent form (slice 13).
 { "agent_selector": { "agent_name": "code-assist" } }
+
+// Label-match form (slice 15). AND across keys; equality on values.
+{ "agent_selector": { "match": { "env": "prod", "tier": "primary" } } }
 ```
 
-```jsonc
-// Slice 15 will extend (additive, non-breaking):
-//   { "agent_selector": { "match": { "env": "prod" } } }
-// Both arms remain valid; the simple form is not deprecated.
-```
+Both arms remain valid; the single-agent form is not deprecated.
+Empty selectors are rejected with `400 Bad Request`.
 
-The platform's selector resolver for slice 13 is exactly one line:
-`WHERE agent_name = $1`. Empty selectors are rejected with `400 Bad Request`.
+The platform's resolver (`storage.ResolveSelector`):
+
+- `{ "agent_name": "X" }` → `WHERE agent_name = $1` (one row).
+- `{ "match": {…} }` → joins `agent_labels` once per key with
+  `GROUP BY a.id HAVING COUNT(DISTINCT al.key) = N`. AND-only for
+  slice 15; future grammar additions (`not_match`, `any_of`) slot in
+  without breaking the existing arms.
 
 ---
 
@@ -114,7 +120,7 @@ re-semanticized.
 |---|---|---|
 | `run` (status: start \| end) | pre-slice-13 | Frozen |
 | `action` | pre-slice-13 | Frozen |
-| `policy_reload` | pre-slice-13 | Frozen |
+| `policy_reload` | pre-slice-13 | Frozen — slice 15 reuses (SSE-driven re-pull writes the same event type) |
 | `intent` | slice 14 | Shipped (additive; pairs with `action` via shared `seq`) |
 
 The HMAC chain in
@@ -172,11 +178,55 @@ The dashboard channel filters by selector via query params
 (`agent_name`, `tool`, `verdict`); cross-tenant isolation is enforced
 server-side from the auth context.
 
-## Reserved sections (populated in later slices)
+## Policy set lifecycle (slice 15)
 
-- **Policy set lifecycle** — slice 15
-- **Hot-reload invariants (HMAC chain + in-flight decisions)** — slice 15
-- **Label-match selector grammar** — slice 15
+A policy_set is the editing unit: a YAML body + a selector that
+resolves at write time to an agent set. Lifecycle:
+
+1. **Author** — the dashboard's policy editor takes a selector
+   (`name:X` or `env=prod, tier=primary`), previews the matched agent
+   set, runs the diff badge against a representative agent's history,
+   and posts to `POST /v1/policy_sets`.
+2. **Persist** — the platform parses + validates the YAML, computes
+   `policy_hash = sha256(yaml)[:8]` (matching the runtime), upserts
+   the row by `(org_id, name)`, bumps `version`.
+3. **Resolve** — `ResolveSelector(org, selector)` returns the agent
+   set the selector matches *right now*. Selector evaluation is
+   live: an agent that gains the matching label after the set is
+   written will be picked up on the next selector resolution.
+4. **Notify** — the platform publishes one `policyfeed.Notification`
+   per matched agent on Postgres channel `relic_policy_updates`.
+5. **Pull + apply** — each agent's `--watch` subscriber receives the
+   notification, calls `client.PullPolicy(agent_name)`, validates,
+   and calls `eng.SwapPolicy(parsed)`. The per-run HMAC chain key is
+   not rotated.
+6. **Report** — the runtime POSTs `/v1/agents/:name/policy_applied`
+   with the applied hash. The platform stores it in
+   `agents.applied_policy_hash` + `applied_at`.
+7. **Render** — the dashboard reads `applied_policy_hash` against the
+   set's `policy_hash` to render "47/52 on hash abc123, 5 stale".
+
+## Hot-reload invariants (slice 15)
+
+Two invariants the runtime preserves across every `eng.SwapPolicy`:
+
+1. **In-flight decisions complete under their starting policy.**
+   `Engine.Evaluate` reads the current `*Policy` under an RLock,
+   releases the lock, then calls the pure `Evaluate` on the
+   captured pointer. `SwapPolicy` takes a write lock and publishes
+   a new pointer; readers either see the old or new pointer, never
+   a torn mixture. Proved by
+   `policy.TestEngineSwapDuringInFlightEvaluate` under the race
+   detector.
+
+2. **The per-run HMAC trace chain key is not rotated on hot reload.**
+   The chain key is derived once at run start via
+   `trace.GenerateChainKey(runID, masterSecret)` and bound to the
+   trace writer. `SwapPolicy` touches only the policy pointer.
+   A run started under v1 keeps its chain key when it hot-reloads
+   to v2; `relic trace verify` (and the platform's
+   `ParseAndVerify`) read the whole trace end-to-end and confirm
+   the chain is intact.
 
 Don't pre-populate; populate when the slice that defines the contract
 actually ships.

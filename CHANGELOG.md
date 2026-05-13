@@ -10,6 +10,62 @@ Cross-repo contracts referenced from entries below live in
 
 ## [Unreleased]
 
+### Added — Slice 15: Universal policy enforcement
+
+- **New migration `012_policy_sets_labels.sql`** — `policy_sets` table
+  (id, org_id, name, selector JSONB, policy_yaml, policy_hash, version),
+  `agent_labels` table (agent_id, key, value), and `applied_policy_hash`
+  / `applied_at` columns on `agents`.
+- **Storage helpers** in `internal/storage/postgres.go`: `UpsertPolicySet`
+  (version-bumping upsert), `GetPolicySetByID`, `GetPolicySetByName`,
+  `SetAgentLabels` (transactional overwrite), `GetAgentLabels`,
+  `ResolveSelector` (handles `{ agent_name }` and `{ match: {…} }`
+  arms; the label-match arm AND's across keys via a single
+  `GROUP BY a.id HAVING COUNT(DISTINCT al.key) = N` query),
+  `MarkPolicyApplied`.
+- **New endpoints**:
+  - `POST /v1/policy_sets` + `PUT /v1/policy_sets/:id` — upsert by
+    (org, name). Parses + validates YAML synchronously, persists the
+    row, fans out a `policyfeed.Notification` per matched agent.
+  - `GET /v1/policy_sets/:id` — set + currently-resolved matched
+    agents + per-agent applied state (the dashboard's "47/52 on
+    hash abc123" payload).
+  - `POST /v1/policy_sets/resolve` — read-only selector preview the
+    editor calls on every selector change.
+  - `POST /v1/agents/:name/labels` — overwrites the agent's label set.
+  - `POST /v1/agents/:name/policy_applied` — runtime closes the apply
+    loop here.
+  - `GET /v1/agents/:name/policy_updates` (SSE, agent-facing) — fans
+    out policy update notifications. Distinct from `/v1/orgs/:id/live`
+    in audience, auth, and event shape.
+- **New package `internal/policyfeed/`** — Postgres LISTEN/NOTIFY hub
+  on channel `relic_policy_updates`, per-(org, agent) subscriber
+  bounded channels with drop-on-overflow. Mirrors the `livefeed`
+  pattern; sibling package because the shape and consumer are
+  different.
+- **`storage.Postgres.Pool()`** now used by both `livefeed` and
+  `policyfeed`. Hub Start runs before HTTP accepts traffic so a
+  listener failure surfaces at boot.
+
+### Constraints respected (slice 15)
+
+- No new infrastructure dependencies (LISTEN/NOTIFY in Postgres).
+- `ActionEvent`, `RunEvent`, `PolicyReloadEvent` untouched.
+- The dashboard-facing SSE channel from slice 14 is unchanged; the
+  agent-facing channel is a *separate* endpoint with separate auth.
+- The simulator endpoint shape is unchanged. The dashboard's diff
+  badge picks the first resolved agent as a representative when the
+  selector matches multiple agents — extending the simulator to
+  fan out internally is reserved for a follow-up slice if needed.
+
+### Tests added
+
+- `internal/policyfeed/hub_test.go` — agent-scoped dispatch, org
+  isolation across same-named agents, slow-consumer drop,
+  subscriber count tracking.
+- `internal/api/policy_sets_test.go` — wire-level auth check on all
+  seven slice-15 endpoints.
+
 ### Added — Slice 14: Live fleet observability
 
 #### Slice 14a — `last_seen` correctness fix

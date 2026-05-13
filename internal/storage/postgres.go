@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -473,15 +474,21 @@ func (p *Postgres) CountExpiredRuns(ctx context.Context, before time.Time) (int,
 // --- Agents ---
 
 type Agent struct {
-	ID               string    `json:"id"`
-	OrgID            string    `json:"org_id"`
-	Name             string    `json:"name"`
-	Version          string    `json:"version"`
-	IdentityManifest []byte    `json:"identity_manifest"`
-	CapabilitiesHash string    `json:"capabilities_hash"`
-	PolicyHash       string    `json:"policy_hash"`
-	RegisteredAt     time.Time `json:"registered_at"`
-	LastSeen         time.Time `json:"last_seen"`
+	ID               string     `json:"id"`
+	OrgID            string     `json:"org_id"`
+	Name             string     `json:"name"`
+	Version          string     `json:"version"`
+	IdentityManifest []byte     `json:"identity_manifest"`
+	CapabilitiesHash string     `json:"capabilities_hash"`
+	PolicyHash       string     `json:"policy_hash"`
+	RegisteredAt     time.Time  `json:"registered_at"`
+	LastSeen         time.Time  `json:"last_seen"`
+
+	// Slice 15: AppliedPolicyHash records the hash the agent most
+	// recently confirmed via POST /v1/agents/:name/policy_applied.
+	// Both fields are nil until the agent reports for the first time.
+	AppliedPolicyHash *string    `json:"applied_policy_hash,omitempty"`
+	AppliedAt         *time.Time `json:"applied_at,omitempty"`
 }
 
 type AgentBaseline struct {
@@ -537,7 +544,8 @@ func (p *Postgres) UpsertAgent(ctx context.Context, a *Agent) error {
 
 func (p *Postgres) ListAgents(ctx context.Context, orgID string) ([]Agent, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT id, org_id, name, version, identity_manifest, capabilities_hash, policy_hash, registered_at, last_seen
+		`SELECT id, org_id, name, version, identity_manifest, capabilities_hash, policy_hash,
+		        registered_at, last_seen, applied_policy_hash, applied_at
 		 FROM agents WHERE org_id = $1 ORDER BY name`, orgID,
 	)
 	if err != nil {
@@ -549,7 +557,8 @@ func (p *Postgres) ListAgents(ctx context.Context, orgID string) ([]Agent, error
 	for rows.Next() {
 		var a Agent
 		if err := rows.Scan(&a.ID, &a.OrgID, &a.Name, &a.Version, &a.IdentityManifest,
-			&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen); err != nil {
+			&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen,
+			&a.AppliedPolicyHash, &a.AppliedAt); err != nil {
 			return nil, err
 		}
 		agents = append(agents, a)
@@ -560,10 +569,12 @@ func (p *Postgres) ListAgents(ctx context.Context, orgID string) ([]Agent, error
 func (p *Postgres) GetAgent(ctx context.Context, orgID, name string) (*Agent, error) {
 	a := &Agent{}
 	err := p.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, version, identity_manifest, capabilities_hash, policy_hash, registered_at, last_seen
+		`SELECT id, org_id, name, version, identity_manifest, capabilities_hash, policy_hash,
+		        registered_at, last_seen, applied_policy_hash, applied_at
 		 FROM agents WHERE org_id = $1 AND name = $2`, orgID, name,
 	).Scan(&a.ID, &a.OrgID, &a.Name, &a.Version, &a.IdentityManifest,
-		&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen)
+		&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen,
+		&a.AppliedPolicyHash, &a.AppliedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -678,10 +689,12 @@ func (p *Postgres) ComputeBaseline(ctx context.Context, orgID, agentID string, w
 func (p *Postgres) GetAgentByID(ctx context.Context, orgID, agentID string) (*Agent, error) {
 	a := &Agent{}
 	err := p.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, version, identity_manifest, capabilities_hash, policy_hash, registered_at, last_seen
+		`SELECT id, org_id, name, version, identity_manifest, capabilities_hash, policy_hash,
+		        registered_at, last_seen, applied_policy_hash, applied_at
 		 FROM agents WHERE id = $1 AND org_id = $2`, agentID, orgID,
 	).Scan(&a.ID, &a.OrgID, &a.Name, &a.Version, &a.IdentityManifest,
-		&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen)
+		&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen,
+		&a.AppliedPolicyHash, &a.AppliedAt)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -877,4 +890,228 @@ func (p *Postgres) GetUserByEmail(ctx context.Context, orgID, email string) (*Us
 		return nil, nil
 	}
 	return u, err
+}
+
+// --- Policy sets & agent labels (Slice 15) ---
+
+// PolicySet is the editing unit for universal policy enforcement. A
+// single set carries a YAML body and a selector that resolves at
+// publish time to an agent set. Updates bump version + recompute
+// policy_hash server-side.
+type PolicySet struct {
+	ID         string          `json:"id"`
+	OrgID      string          `json:"org_id"`
+	Name       string          `json:"name"`
+	Selector   json.RawMessage `json:"selector"`
+	PolicyYAML string          `json:"policy_yaml"`
+	PolicyHash string          `json:"policy_hash"`
+	Version    int             `json:"version"`
+	CreatedAt  time.Time       `json:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+}
+
+// UpsertPolicySet creates or updates by (org_id, name). The caller is
+// responsible for computing PolicyHash; we don't recompute here so the
+// hash stays consistent with whatever the runtime + simulator pin off.
+// Returns the resulting row with version reflecting the upsert.
+func (p *Postgres) UpsertPolicySet(ctx context.Context, s *PolicySet) error {
+	return p.pool.QueryRow(ctx, `
+		INSERT INTO policy_sets (org_id, name, selector, policy_yaml, policy_hash, version)
+		VALUES ($1, $2, $3, $4, $5, 1)
+		ON CONFLICT (org_id, name) DO UPDATE SET
+		  selector    = EXCLUDED.selector,
+		  policy_yaml = EXCLUDED.policy_yaml,
+		  policy_hash = EXCLUDED.policy_hash,
+		  version     = policy_sets.version + 1,
+		  updated_at  = now()
+		RETURNING id, version, created_at, updated_at
+	`, s.OrgID, s.Name, s.Selector, s.PolicyYAML, s.PolicyHash,
+	).Scan(&s.ID, &s.Version, &s.CreatedAt, &s.UpdatedAt)
+}
+
+// GetPolicySetByID returns the named set scoped to org. Nil-on-miss
+// mirrors GetAgent — callers can't distinguish "not found" from "not
+// allowed", which is the tenant-isolation behavior we want.
+func (p *Postgres) GetPolicySetByID(ctx context.Context, orgID, id string) (*PolicySet, error) {
+	s := &PolicySet{}
+	err := p.pool.QueryRow(ctx, `
+		SELECT id, org_id, name, selector, policy_yaml, policy_hash, version, created_at, updated_at
+		FROM policy_sets WHERE org_id = $1 AND id = $2
+	`, orgID, id).Scan(&s.ID, &s.OrgID, &s.Name, &s.Selector, &s.PolicyYAML, &s.PolicyHash, &s.Version, &s.CreatedAt, &s.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get policy set: %w", err)
+	}
+	return s, nil
+}
+
+// GetPolicySetByName is the slice-15 read path the app's editor uses
+// when the operator addresses a set by name (the demo path).
+func (p *Postgres) GetPolicySetByName(ctx context.Context, orgID, name string) (*PolicySet, error) {
+	s := &PolicySet{}
+	err := p.pool.QueryRow(ctx, `
+		SELECT id, org_id, name, selector, policy_yaml, policy_hash, version, created_at, updated_at
+		FROM policy_sets WHERE org_id = $1 AND name = $2
+	`, orgID, name).Scan(&s.ID, &s.OrgID, &s.Name, &s.Selector, &s.PolicyYAML, &s.PolicyHash, &s.Version, &s.CreatedAt, &s.UpdatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get policy set by name: %w", err)
+	}
+	return s, nil
+}
+
+// SetAgentLabels overwrites the label set for an agent: deletes
+// existing rows, inserts the new ones, all in one transaction.
+// "Overwrites" rather than "merges" because that's the mental model
+// operators have ("env=prod tier=primary" replaces whatever was there).
+func (p *Postgres) SetAgentLabels(ctx context.Context, orgID, agentName string, labels map[string]string) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("set agent labels: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var agentID string
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM agents WHERE org_id = $1 AND name = $2`, orgID, agentName,
+	).Scan(&agentID)
+	if err == pgx.ErrNoRows {
+		return fmt.Errorf("set agent labels: agent %q not found", agentName)
+	}
+	if err != nil {
+		return fmt.Errorf("set agent labels: resolve agent: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM agent_labels WHERE agent_id = $1`, agentID); err != nil {
+		return fmt.Errorf("set agent labels: delete: %w", err)
+	}
+
+	for k, v := range labels {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO agent_labels (agent_id, key, value) VALUES ($1, $2, $3)`,
+			agentID, k, v,
+		); err != nil {
+			return fmt.Errorf("set agent labels: insert %q: %w", k, err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// GetAgentLabels returns the agent's current label set. Empty map when
+// the agent has no labels (still a valid state — the agent may match
+// only by name).
+func (p *Postgres) GetAgentLabels(ctx context.Context, orgID, agentName string) (map[string]string, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT al.key, al.value FROM agent_labels al
+		JOIN agents a ON a.id = al.agent_id
+		WHERE a.org_id = $1 AND a.name = $2
+	`, orgID, agentName)
+	if err != nil {
+		return nil, fmt.Errorf("get agent labels: %w", err)
+	}
+	defer rows.Close()
+	labels := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		labels[k] = v
+	}
+	return labels, nil
+}
+
+// ResolveSelector returns the agents matching a slice-15 selector.
+// Supports two arms:
+//
+//	{ "agent_name": "code-assist" }
+//	{ "match": { "env": "prod", "tier": "primary" } }   // AND across keys
+//
+// The match arm is implemented as a single SQL query that joins
+// agent_labels back to itself once per key — fine for the slice-15
+// scale (a few keys per selector). Future grammar additions (any_of,
+// not_match) would warrant a query builder; we don't pre-build that
+// today.
+func (p *Postgres) ResolveSelector(ctx context.Context, orgID string, selector json.RawMessage) ([]Agent, error) {
+	var parsed struct {
+		AgentName string            `json:"agent_name"`
+		Match     map[string]string `json:"match"`
+	}
+	if err := json.Unmarshal(selector, &parsed); err != nil {
+		return nil, fmt.Errorf("resolve selector: invalid JSON: %w", err)
+	}
+
+	if parsed.AgentName != "" {
+		a, err := p.GetAgent(ctx, orgID, parsed.AgentName)
+		if err != nil || a == nil {
+			return nil, err
+		}
+		return []Agent{*a}, nil
+	}
+
+	if len(parsed.Match) == 0 {
+		return nil, fmt.Errorf("resolve selector: empty selector")
+	}
+
+	// Build a query that requires every (key, value) pair to match.
+	// `GROUP BY a.id HAVING COUNT(DISTINCT al.key) = $N` is the
+	// idiomatic SQL form for label-AND match, where N is the number
+	// of required keys.
+	args := []any{orgID}
+	conds := []string{}
+	for k, v := range parsed.Match {
+		args = append(args, k, v)
+		conds = append(conds, fmt.Sprintf("(al.key = $%d AND al.value = $%d)", len(args)-1, len(args)))
+	}
+	args = append(args, len(parsed.Match))
+
+	query := fmt.Sprintf(`
+		SELECT a.id, a.org_id, a.name, a.version, a.identity_manifest, a.capabilities_hash, a.policy_hash,
+		       a.registered_at, a.last_seen, a.applied_policy_hash, a.applied_at
+		FROM agents a
+		JOIN agent_labels al ON al.agent_id = a.id
+		WHERE a.org_id = $1 AND (%s)
+		GROUP BY a.id
+		HAVING COUNT(DISTINCT al.key) = $%d
+		ORDER BY a.name
+	`, strings.Join(conds, " OR "), len(args))
+
+	rows, err := p.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("resolve selector: query: %w", err)
+	}
+	defer rows.Close()
+	var out []Agent
+	for rows.Next() {
+		var a Agent
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.Name, &a.Version, &a.IdentityManifest,
+			&a.CapabilitiesHash, &a.PolicyHash, &a.RegisteredAt, &a.LastSeen,
+			&a.AppliedPolicyHash, &a.AppliedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// MarkPolicyApplied advances the agent's applied-state. Called from
+// POST /v1/agents/:name/policy_applied. We update by name (not id)
+// because the runtime knows its name, not the platform-side UUID.
+func (p *Postgres) MarkPolicyApplied(ctx context.Context, orgID, agentName, hash string) error {
+	res, err := p.pool.Exec(ctx,
+		`UPDATE agents SET applied_policy_hash = $1, applied_at = now()
+		 WHERE org_id = $2 AND name = $3`,
+		hash, orgID, agentName,
+	)
+	if err != nil {
+		return fmt.Errorf("mark policy applied: %w", err)
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("mark policy applied: agent %q not found", agentName)
+	}
+	return nil
 }

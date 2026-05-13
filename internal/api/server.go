@@ -16,6 +16,7 @@ import (
 	"github.com/therelicai/therelic-platform/internal/api/middleware"
 	"github.com/therelicai/therelic-platform/internal/livefeed"
 	"github.com/therelicai/therelic-platform/internal/metrics"
+	"github.com/therelicai/therelic-platform/internal/policyfeed"
 	"github.com/therelicai/therelic-platform/internal/simulate"
 	"github.com/therelicai/therelic-platform/internal/storage"
 )
@@ -74,6 +75,11 @@ type Server struct {
 	// when unset (e.g., test contexts without a Postgres LISTEN
 	// connection).
 	live *livefeed.Hub
+
+	// policyfeed is the slice-15 pub/sub hub for agent-facing policy
+	// update notifications. Nil-safe: handleAgentPolicyUpdates and
+	// handleUpsertPolicySet return 503 when unset.
+	policyfeed *policyfeed.Hub
 }
 
 // WithLiveFeed attaches a livefeed.Hub to the server. Like
@@ -82,6 +88,13 @@ type Server struct {
 // Start has succeeded.
 func (s *Server) WithLiveFeed(h *livefeed.Hub) *Server {
 	s.live = h
+	return s
+}
+
+// WithPolicyFeed attaches a policyfeed.Hub. Wire from the API
+// entrypoint after Start has succeeded.
+func (s *Server) WithPolicyFeed(h *policyfeed.Hub) *Server {
+	s.policyfeed = h
 	return s
 }
 
@@ -320,6 +333,15 @@ func (s *Server) Router() http.Handler {
 		// Live feed (Slice 14)
 		r.Post("/intents", s.handlePostIntent)
 		r.Get("/orgs/{orgID}/live", s.handleOrgLive)
+
+		// Universal policy (Slice 15)
+		r.Post("/policy_sets", s.handleUpsertPolicySet)
+		r.Put("/policy_sets/{id}", s.handleUpsertPolicySet) // upsert-by-name; id is informational
+		r.Get("/policy_sets/{id}", s.handleGetPolicySet)
+		r.Post("/policy_sets/resolve", s.handleResolveSelector)
+		r.Post("/agents/{name}/labels", s.handleSetAgentLabels)
+		r.Post("/agents/{name}/policy_applied", s.handlePolicyApplied)
+		r.Get("/agents/{name}/policy_updates", s.handleAgentPolicyUpdates)
 	})
 
 	return r

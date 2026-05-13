@@ -14,6 +14,7 @@ import (
 	"github.com/therelicai/therelic-platform/internal/api"
 	"github.com/therelicai/therelic-platform/internal/livefeed"
 	"github.com/therelicai/therelic-platform/internal/metrics"
+	"github.com/therelicai/therelic-platform/internal/policyfeed"
 	"github.com/therelicai/therelic-platform/internal/retention"
 	"github.com/therelicai/therelic-platform/internal/simulate"
 	"github.com/therelicai/therelic-platform/internal/storage"
@@ -86,9 +87,20 @@ func main() {
 	}
 	defer live.Close()
 
+	// Slice 15: agent-facing policy update hub. Same pattern as the
+	// dashboard live feed but on a separate Postgres channel so the
+	// two surfaces (dashboard vs agent) can't drift into each other.
+	policyHub := policyfeed.New(db.Pool(), logger)
+	if err := policyHub.Start(context.Background()); err != nil {
+		slog.Error("failed to start policy feed", "error", err)
+		os.Exit(1)
+	}
+	defer policyHub.Close()
+
 	srv := api.NewServer(db, s3Client, jwtSecret, logger).
 		WithSimulator(simulator).
-		WithLiveFeed(live)
+		WithLiveFeed(live).
+		WithPolicyFeed(policyHub)
 
 	httpServer := &http.Server{
 		Addr:         ":" + port,

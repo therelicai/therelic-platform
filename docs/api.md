@@ -334,6 +334,137 @@ shapes (policy update notifications, not action stream).
 
 ---
 
+## Universal policy (slice 15)
+
+The slice-15 surfaces fold the editor's "pick an agent" affordance
+into a selector-driven flow. See [RELIC.md → Policy set lifecycle](../RELIC.md#policy-set-lifecycle-slice-15)
+for the seven-step write-to-applied sequence.
+
+### POST `/v1/policy_sets` / PUT `/v1/policy_sets/:id`
+
+Create or replace a policy_set by name. Both verbs hit the same
+upsert handler; `:id` on the PUT path is informational (the
+canonical key is `(org_id, name)`).
+
+```json
+{
+  "name": "prod-baseline",
+  "selector": { "match": { "env": "prod" } },
+  "policy_yaml": "version: \"1\"\nagent:\n  name: prod-baseline\n…"
+}
+```
+
+**Constraints:**
+
+- Body cap 64 KiB.
+- `selector`, `name`, `policy_yaml` are all required.
+- Selector is parsed + validated against `storage.ResolveSelector`.
+  The selector grammar lives in [RELIC.md → Selector contract](../RELIC.md#selector-contract).
+- YAML is parsed + validated synchronously; invalid YAML returns 400.
+
+**Response (200):**
+
+```json
+{
+  "id": "01J…",
+  "name": "prod-baseline",
+  "policy_hash": "abc12345",
+  "version": 2,
+  "matched_agents": [ {"id": "…", "name": "code-assist", …}, … ],
+  "created_at": "…",
+  "updated_at": "…"
+}
+```
+
+Side effects: after persisting, the platform publishes one
+`policyfeed.Notification` per matched agent on Postgres channel
+`relic_policy_updates`. Per-agent publish failures are logged and
+counted; the row is already durable so the dashboard's stale
+counter renders the missing applies.
+
+### GET `/v1/policy_sets/:id`
+
+Returns the set + the currently-resolved agent list + per-agent
+applied state.
+
+```json
+{
+  "id": "01J…",
+  "name": "prod-baseline",
+  "selector": { "match": { "env": "prod" } },
+  "policy_yaml": "…",
+  "policy_hash": "abc12345",
+  "version": 2,
+  "matched_agents": [
+    { "name": "code-assist", "applied_policy_hash": "abc12345", "applied_at": "…", "stale": false },
+    { "name": "mobile-helper", "applied_policy_hash": null, "applied_at": null, "stale": true }
+  ],
+  "applied_state": { "on_hash": 1, "stale": 1, "total": 2 }
+}
+```
+
+### POST `/v1/policy_sets/resolve`
+
+Read-only preview. Body:
+
+```json
+{ "selector": { "match": { "env": "prod" } }, "policy_hash": "abc12345" }
+```
+
+`policy_hash` is optional; when present, the response includes the
+`applied_state` counts. The dashboard's editor uses this on selector
+change to render "matches N agents" + the stale/on-hash strip
+without writing a set.
+
+### POST `/v1/agents/:name/labels`
+
+Overwrite the agent's label set:
+
+```json
+{ "labels": { "env": "prod", "tier": "primary" } }
+```
+
+Transactional: existing labels are deleted, new ones inserted. 404
+if the named agent isn't registered for the calling org.
+
+### POST `/v1/agents/:name/policy_applied`
+
+Advance applied-state. Called by the runtime after a successful
+hot-reload.
+
+```json
+{ "hash": "abc12345" }
+```
+
+Sets `agents.applied_policy_hash = $hash` and `applied_at = now()`.
+204 on success, 404 if the agent isn't registered.
+
+### GET `/v1/agents/:name/policy_updates` (SSE)
+
+Agent-facing channel — **distinct** from the dashboard channel
+`GET /v1/orgs/:id/live`:
+
+| | Dashboard `/orgs/:id/live` | Agent `/agents/:name/policy_updates` |
+|---|---|---|
+| Audience | Human dashboards | Runtime processes |
+| Auth | User JWT | Org-scoped API key (`rk_…`) |
+| Filter | per-org + optional selector params | Implicit: only this `(org, agent)` |
+| Frames | `event: intent` / `event: action` | `event: policy_update` |
+
+**Frame format:**
+
+```
+event: policy_update
+data: {"org_id":"…","agent_name":"code-assist","policy_hash":"abc12345","version":2,"policy_set_name":"prod-baseline","published_at":"…"}
+```
+
+The runtime parses the data, pulls policy via
+`GET /v1/agents/:name/policy`, hot-reloads in place via
+`eng.SwapPolicy`, and POSTs `/v1/agents/:name/policy_applied`. The
+per-run HMAC chain key is not rotated.
+
+---
+
 ## Reserved (populated by later slices)
 
-- `POST/PUT /v1/policy_sets`, `POST /v1/agents/:id/labels`, `GET /v1/agents/:id/policy_updates` (SSE, agent), `POST /v1/agents/:id/policy_applied` — slice 15
+_(None for the slices defined to date.)_

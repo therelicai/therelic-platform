@@ -39,6 +39,8 @@ const (
 	auditAPIKeyRevoke   auditAction = "apikey.revoke"
 	auditOrgCreate      auditAction = "org.create"
 	auditPolicySimulate auditAction = "policy.simulate"
+	auditPolicySetWrite auditAction = "policy_set.write"
+	auditAgentLabels    auditAction = "agent.labels"
 )
 
 // auditLog records an audit row and never fails the caller. Mutations
