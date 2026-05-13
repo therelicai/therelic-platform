@@ -75,6 +75,14 @@ func (p *Postgres) Close() {
 	p.pool.Close()
 }
 
+// Pool exposes the underlying pgxpool for callers that need
+// connection-level operations the storage API doesn't surface — e.g.,
+// the livefeed hub's dedicated LISTEN connection. Callers MUST NOT
+// close the pool; ownership stays with this struct.
+func (p *Postgres) Pool() *pgxpool.Pool {
+	return p.pool
+}
+
 // Ping checks the pool can reach the database. Used by /readyz.
 func (p *Postgres) Ping(ctx context.Context) error {
 	return p.pool.Ping(ctx)
@@ -323,6 +331,45 @@ func (p *Postgres) ListRuns(ctx context.Context, orgID string, agentName string,
 	return runs, nil
 }
 
+// ListRunsForSimulate returns runs for a single agent that started on
+// or after `since`, most-recent first, capped at `limit`. Slice 13's
+// diff badge calls this with limit=200 — enough to swamp the
+// per-simulation budget without us either paginating or pulling
+// unbounded rows.
+//
+// The selector is one agent name today; slice 15 will resolve labels
+// to a set and call this once per resolved agent (or, more likely,
+// extend the WHERE clause to take a list).
+func (p *Postgres) ListRunsForSimulate(ctx context.Context, orgID, agentName string, since time.Time, limit int) ([]Run, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, org_id, agent_name, agent_version, policy_hash, environment,
+		   started_at, duration_ms, exit_code, actions_total, actions_allowed, actions_denied,
+		   storage_key, expires_at, integrity_chain, chain_verified, truncated
+		  FROM runs
+		  WHERE org_id = $1 AND agent_name = $2 AND started_at >= $3
+		  ORDER BY started_at DESC
+		  LIMIT $4`,
+		orgID, agentName, since, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list runs for simulate: %w", err)
+	}
+	defer rows.Close()
+
+	var runs []Run
+	for rows.Next() {
+		var r Run
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.AgentName, &r.AgentVersion, &r.PolicyHash,
+			&r.Environment, &r.StartedAt, &r.DurationMs, &r.ExitCode,
+			&r.ActionsTotal, &r.ActionsAllowed, &r.ActionsDenied, &r.StorageKey, &r.ExpiresAt,
+			&r.IntegrityChain, &r.ChainVerified, &r.Truncated); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		runs = append(runs, r)
+	}
+	return runs, nil
+}
+
 func (p *Postgres) GetRun(ctx context.Context, orgID, runID string) (*Run, error) {
 	r := &Run{}
 	err := p.pool.QueryRow(ctx,
@@ -455,6 +502,22 @@ type AuditEvent struct {
 	ResourceID string    `json:"resource_id"`
 	Metadata   []byte    `json:"metadata"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+// UpdateAgentLastSeen bumps the `last_seen` column for a (org, name)
+// pair. Called on every successful trace upload and on every streaming
+// intent so the dashboard's "Online" pill reflects what's actually
+// happening, not just when an agent re-registered.
+//
+// Silent no-op when no row matches: handleUploadTrace doesn't require
+// the agent to be pre-registered, so a missing row is normal during
+// the first run of an agent that hasn't called POST /v1/agents yet.
+func (p *Postgres) UpdateAgentLastSeen(ctx context.Context, orgID, agentName string) error {
+	_, err := p.pool.Exec(ctx,
+		`UPDATE agents SET last_seen = now() WHERE org_id = $1 AND name = $2`,
+		orgID, agentName,
+	)
+	return err
 }
 
 func (p *Postgres) UpsertAgent(ctx context.Context, a *Agent) error {

@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/therelicai/therelic-platform/internal/api"
+	"github.com/therelicai/therelic-platform/internal/livefeed"
 	"github.com/therelicai/therelic-platform/internal/metrics"
 	"github.com/therelicai/therelic-platform/internal/retention"
+	"github.com/therelicai/therelic-platform/internal/simulate"
 	"github.com/therelicai/therelic-platform/internal/storage"
 )
 
@@ -70,7 +72,23 @@ func main() {
 
 	jwtSecret := os.Getenv("SUPABASE_JWT_SECRET")
 
-	srv := api.NewServer(db, s3Client, jwtSecret, logger)
+	simulator := simulate.NewRunner(db, s3Client, logger)
+
+	// Live-feed hub binds a dedicated LISTEN connection from the pool.
+	// We Start it before the HTTP server starts accepting so a
+	// listener failure surfaces at boot, not at first live-view
+	// connection. Failure here is fatal — silently degrading the live
+	// view to "nothing ever appears" would be the worst possible UX.
+	live := livefeed.New(db.Pool(), logger)
+	if err := live.Start(context.Background()); err != nil {
+		slog.Error("failed to start live feed", "error", err)
+		os.Exit(1)
+	}
+	defer live.Close()
+
+	srv := api.NewServer(db, s3Client, jwtSecret, logger).
+		WithSimulator(simulator).
+		WithLiveFeed(live)
 
 	httpServer := &http.Server{
 		Addr:         ":" + port,

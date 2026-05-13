@@ -178,6 +178,15 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Slice 14a: keep the "Online" pill honest. An agent that runs
+	// without re-registering still has its last_seen advanced on every
+	// batch upload. Failure here is logged, not fatal — the upload
+	// already succeeded and the run is indexed; a stale pill is a
+	// cosmetic regression, not a data loss.
+	if err := s.db.UpdateAgentLastSeen(r.Context(), orgID, agentName); err != nil {
+		s.logger.Warn("update agent last_seen failed", "error", err, "org_id", orgID, "agent_name", agentName)
+	}
+
 	s.auditLog(r.Context(), auditTraceUpload, "run", runID, map[string]any{
 		"agent_name":      agentName,
 		"actions_total":   summary.ActionsTotal,

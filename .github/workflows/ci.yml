@@ -58,6 +58,61 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # ---------------------------------------------------------------------------
+  # Policy engine drift check
+  #
+  # internal/policy/ is a byte-for-byte mirror of the runtime's policy
+  # package (see UPSTREAM.txt). The diff badge's commercial promise —
+  # "the platform's simulator agrees with the runtime's enforcer" —
+  # depends on those files staying in lockstep. This job clones the
+  # runtime at the pinned SHA and refuses to merge if any mirrored
+  # file differs by a single byte. To intentionally bump: update
+  # UPSTREAM_SHA in UPSTREAM.txt, re-copy the FILES list, open one PR.
+  # ---------------------------------------------------------------------------
+  policy-drift:
+    name: Policy engine drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diff vendored policy package against upstream
+        run: |
+          set -euo pipefail
+          UP=internal/policy/UPSTREAM.txt
+          if [ ! -f "$UP" ]; then
+            echo "$UP missing — vendored policy mirror is misconfigured"
+            exit 1
+          fi
+          UPSTREAM_REPO=$(grep '^UPSTREAM_REPO=' "$UP" | cut -d= -f2-)
+          UPSTREAM_SHA=$(grep '^UPSTREAM_SHA=' "$UP" | cut -d= -f2-)
+          FILES=$(grep '^FILES=' "$UP" | cut -d= -f2-)
+          if [ -z "$UPSTREAM_REPO" ] || [ -z "$UPSTREAM_SHA" ] || [ -z "$FILES" ]; then
+            echo "$UP is missing one of UPSTREAM_REPO / UPSTREAM_SHA / FILES"
+            exit 1
+          fi
+          echo "Pinned upstream: $UPSTREAM_REPO @ $UPSTREAM_SHA"
+          TMP=$(mktemp -d)
+          git clone --quiet "$UPSTREAM_REPO" "$TMP/runtime"
+          git -C "$TMP/runtime" checkout --quiet "$UPSTREAM_SHA"
+          status=0
+          for f in $FILES; do
+            up="$TMP/runtime/internal/policy/$f"
+            mine="internal/policy/$f"
+            if [ ! -f "$up" ]; then
+              echo "FAIL: upstream missing $f at SHA $UPSTREAM_SHA"
+              status=1
+              continue
+            fi
+            if ! diff -q "$up" "$mine" > /dev/null; then
+              echo "FAIL: $f drifted from upstream"
+              diff -u "$up" "$mine" || true
+              status=1
+            else
+              echo "OK:   $f matches upstream"
+            fi
+          done
+          rm -rf "$TMP"
+          exit $status
+
+  # ---------------------------------------------------------------------------
   # Vulncheck (advisory)
   # ---------------------------------------------------------------------------
   vulncheck:

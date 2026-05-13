@@ -1,0 +1,26 @@
+# Vendored policy package — source of truth lives in the runtime.
+#
+# This package is a byte-for-byte mirror of a subset of
+# github.com/therelicai/therelic/internal/policy. The rationale is the
+# same as the trace integrity mirror (see ../trace/integrity.go):
+# the platform is a separate deployable on a separate license (BSL 1.1
+# vs Apache), and adding the runtime as a Go module dependency would
+# couple two trees that are intentionally isolated.
+#
+# A CI job (policy-drift in .github/workflows/ci.yml) clones the
+# runtime at the SHA below and refuses to merge if any mirrored file
+# differs from upstream by a single byte. To bump:
+#   1. Update UPSTREAM_SHA.
+#   2. Re-copy every file in FILES from the runtime at that SHA.
+#   3. Run `go test ./internal/policy/...` locally.
+#   4. Open one PR for the bump.
+#
+# Do not hand-edit any FILES entry — local edits will fail CI and
+# silently re-diverge the platform's simulator from the runtime's
+# enforcer, which is the only thing the diff badge's commercial
+# promise depends on.
+
+UPSTREAM_REPO=https://github.com/therelicai/therelic
+UPSTREAM_SHA=2ce998e509f9cd6ef973dfe5f70da00c40111698
+
+FILES=engine.go parser.go sequence.go

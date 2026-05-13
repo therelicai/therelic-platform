@@ -125,9 +125,15 @@ The runtime and the platform communicate **only over HTTP** — there is no shar
 
 Base: `https://api.therelic.dev/v1` — Auth via Bearer JWT (Supabase Auth) or org-scoped API key.
 
+Full request/response schemas live in [docs/api.md](./docs/api.md). Cross-repo
+contracts (selector shape, event types, replay protocol) live in
+[RELIC.md](./RELIC.md).
+
 | Group | Endpoints | Description |
 |---|---|---|
 | **Traces** | `POST /traces`, `GET /traces`, `GET /traces/:id`, `GET /traces/:id/events`, `DELETE /traces/:id` | Upload, list, view, download, and delete trace runs |
+| **Policy simulator** | `POST /policy/simulate`, `GET /policy/simulate/:job_id` | Replay candidate policy against historical traces and report the diff. The diff badge in the policy editor is the consumer. |
+| **Live feed** | `POST /intents`, `GET /orgs/:orgID/live` | Runtimes push sealed `intent`/`action` events as they happen; dashboards subscribe to the SSE stream. Postgres LISTEN/NOTIFY backplane, no extra infra. |
 | **Agents** | `POST /agents`, `GET /agents`, `GET /agents/:name`, `GET /agents/:name/policy`, `PUT /agents/:name/policy`, `GET /agents/:name/baseline` | Agent registry, policy distribution, behavioral baselines |
 | **Organizations** | `POST /orgs`, `GET /orgs/:id`, `POST /orgs/:id/api-keys`, `DELETE /orgs/:id/api-keys/:kid` | Org management and API key lifecycle |
 | **Proposals** | `GET /proposals`, `GET /proposals/:id`, `POST /proposals/:id/approve`, `POST /proposals/:id/reject`, `DELETE /proposals/:id` | Governance proposals from automated detection |
@@ -300,8 +306,11 @@ docs/                  # Architecture, deployment, development guides
 
 | Document | Description |
 |---|---|
-| `docs/ARCHITECTURE.md` | Full technical architecture |
-| `docs/BUILD_PLAN.md` | Master build plan and phasing |
-| `docs/DEPLOYMENT.md` | Fly.io, Cloudflare, Supabase deployment guide |
-| `docs/DEVELOPMENT.md` | Local development setup |
-| `docs/DOMAINS.md` | Domain and DNS architecture |
+| [RELIC.md](./RELIC.md) | Cross-repo alignment doc — selector contract, event shapes, replay protocol, lifecycle. Authoritative across all four repos. |
+| [docs/api.md](./docs/api.md) | Full endpoint reference (request/response schemas). The README endpoint table summarizes; this is the source of truth. |
+| [CHANGELOG.md](./CHANGELOG.md) | Release notes (Keep-a-Changelog format). |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Full technical architecture |
+| [docs/BUILD_PLAN.md](./docs/BUILD_PLAN.md) | Master build plan and phasing |
+| [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Fly.io, Cloudflare, Supabase deployment guide |
+| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Local development setup |
+| [docs/DOMAINS.md](./docs/DOMAINS.md) | Domain and DNS architecture |

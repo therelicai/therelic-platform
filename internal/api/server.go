@@ -14,7 +14,9 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/therelicai/therelic-platform/internal/api/middleware"
+	"github.com/therelicai/therelic-platform/internal/livefeed"
 	"github.com/therelicai/therelic-platform/internal/metrics"
+	"github.com/therelicai/therelic-platform/internal/simulate"
 	"github.com/therelicai/therelic-platform/internal/storage"
 )
 
@@ -61,6 +63,35 @@ type Server struct {
 	// Default false so legacy/unsealed clients can still upload during
 	// a rollout window.
 	requireSealedTraces bool
+
+	// simulate runs candidate-policy diff jobs against historical
+	// traces. Nil-safe: handleSimulatePolicy returns 503 when unset,
+	// so the API still boots in test contexts that don't wire S3.
+	simulate *simulate.Runner
+
+	// live is the slice-14 pub/sub hub powering the dashboard's Live
+	// view. Nil-safe: handlePostIntent and handleOrgLive return 503
+	// when unset (e.g., test contexts without a Postgres LISTEN
+	// connection).
+	live *livefeed.Hub
+}
+
+// WithLiveFeed attaches a livefeed.Hub to the server. Like
+// WithSimulator, kept as a setter so existing callers of NewServer
+// compile unchanged. Wire from the API entrypoint after the hub's
+// Start has succeeded.
+func (s *Server) WithLiveFeed(h *livefeed.Hub) *Server {
+	s.live = h
+	return s
+}
+
+// WithSimulator attaches a simulate.Runner to the server. Called from
+// the API entrypoint after S3 + db are wired so the runner can reach
+// both. Kept as a setter (rather than NewServer arg) so existing
+// callers of NewServer compile unchanged.
+func (s *Server) WithSimulator(r *simulate.Runner) *Server {
+	s.simulate = r
+	return s
 }
 
 // loadTraceMasterSecret decodes RELIC_TRACE_KEY (hex) and returns the
@@ -281,6 +312,14 @@ func (s *Server) Router() http.Handler {
 		r.Get("/transactions", s.handleListTransactions)
 		r.Get("/transactions/summary", s.handleTransactionSummary)
 		r.Get("/transactions/{txnID}", s.handleGetTransaction)
+
+		// Policy simulator (Slice 13)
+		r.Post("/policy/simulate", s.handleSimulatePolicy)
+		r.Get("/policy/simulate/{jobID}", s.handleGetSimulateJob)
+
+		// Live feed (Slice 14)
+		r.Post("/intents", s.handlePostIntent)
+		r.Get("/orgs/{orgID}/live", s.handleOrgLive)
 	})
 
 	return r
