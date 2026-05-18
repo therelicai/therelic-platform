@@ -858,20 +858,38 @@ func (p *Postgres) UpdateProposalStatus(ctx context.Context, orgID, proposalID, 
 // --- Users ---
 
 type User struct {
-	ID        string    `json:"id"`
-	OrgID     string    `json:"org_id"`
-	Email     string    `json:"email"`
-	Role      string    `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
+	ID           string    `json:"id"`
+	OrgID        string    `json:"org_id"`
+	Email        string    `json:"email"`
+	Role         string    `json:"role"`
+	CreatedAt    time.Time `json:"created_at"`
+	PasswordHash string    `json:"-"` // never serialized
+	AuthProvider string    `json:"auth_provider"`
 }
 
 func (p *Postgres) CreateUser(ctx context.Context, orgID, email, role string) (*User, error) {
 	u := &User{}
 	err := p.pool.QueryRow(ctx,
 		`INSERT INTO users (org_id, email, role) VALUES ($1, $2, $3)
-		 RETURNING id, org_id, email, role, created_at`,
+		 RETURNING id, org_id, email, role, created_at, COALESCE(password_hash, ''), auth_provider`,
 		orgID, email, role,
-	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt)
+	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt, &u.PasswordHash, &u.AuthProvider)
+	return u, err
+}
+
+// CreateUserWithPassword inserts a user with a bcrypt password hash and
+// an explicit auth_provider tag. Used by the LocalAuth adapter to
+// bootstrap the first admin and to provision invited team members.
+// Pass authProvider as "local" / "supabase" / "oidc:<issuer>" so the
+// API can later refuse cross-provider login attempts.
+func (p *Postgres) CreateUserWithPassword(ctx context.Context, orgID, email, role, passwordHash, authProvider string) (*User, error) {
+	u := &User{}
+	err := p.pool.QueryRow(ctx,
+		`INSERT INTO users (org_id, email, role, password_hash, auth_provider)
+		 VALUES ($1,$2,$3,$4,$5)
+		 RETURNING id, org_id, email, role, created_at, COALESCE(password_hash, ''), auth_provider`,
+		orgID, email, role, passwordHash, authProvider,
+	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt, &u.PasswordHash, &u.AuthProvider)
 	return u, err
 }
 
@@ -884,12 +902,50 @@ func (p *Postgres) GetUserByEmail(ctx context.Context, orgID, email string) (*Us
 	}
 	u := &User{}
 	err := p.pool.QueryRow(ctx,
-		`SELECT id, org_id, email, role, created_at FROM users WHERE email = $1 AND org_id = $2`, email, orgID,
-	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt)
+		`SELECT id, org_id, email, role, created_at, COALESCE(password_hash, ''), auth_provider
+		 FROM users WHERE email = $1 AND org_id = $2`, email, orgID,
+	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt, &u.PasswordHash, &u.AuthProvider)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
 	return u, err
+}
+
+// LookupUserForLogin returns the user matching email + auth_provider
+// across all orgs. The users table has a UNIQUE constraint on email,
+// so this returns at most one row. Required for local-auth and OIDC
+// login, where the caller knows email but not org_id at sign-in time.
+// Refuses to match if the user was created by a different provider.
+func (p *Postgres) LookupUserForLogin(ctx context.Context, email, authProvider string) (*User, error) {
+	if email == "" {
+		return nil, nil
+	}
+	u := &User{}
+	err := p.pool.QueryRow(ctx,
+		`SELECT id, org_id, email, role, created_at, COALESCE(password_hash, ''), auth_provider
+		 FROM users WHERE email = $1 AND auth_provider = $2`, email, authProvider,
+	).Scan(&u.ID, &u.OrgID, &u.Email, &u.Role, &u.CreatedAt, &u.PasswordHash, &u.AuthProvider)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return u, err
+}
+
+// CountUsers returns the total number of users across all orgs.
+func (p *Postgres) CountUsers(ctx context.Context) (int, error) {
+	var n int
+	err := p.pool.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+// CountUsersByProvider returns the number of users created by a
+// specific auth_provider tag. The local-auth bootstrap uses this to
+// know whether it has provisioned an admin yet, independent of any
+// Supabase / OIDC users that may have been created earlier.
+func (p *Postgres) CountUsersByProvider(ctx context.Context, provider string) (int, error) {
+	var n int
+	err := p.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE auth_provider = $1`, provider).Scan(&n)
+	return n, err
 }
 
 // --- Policy sets & agent labels (Slice 15) ---

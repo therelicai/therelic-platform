@@ -2,14 +2,12 @@ package middleware
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"net/http"
-	"os"
 	"strings"
 
-	"github.com/golang-jwt/jwt/v5"
-
+	"github.com/therelicai/therelic-platform/internal/auth"
 	"github.com/therelicai/therelic-platform/internal/storage"
 )
 
@@ -30,13 +28,23 @@ func UserIDFromContext(ctx context.Context) string {
 	return v
 }
 
+// Auth is the HTTP authentication middleware. Two paths land here:
+//
+//   1. Bearer rk_*  — API key. Validated against the api_keys table
+//                     via storage.ValidateAPIKey. Mode-agnostic;
+//                     works the same in local/supabase/oidc.
+//
+//   2. Bearer <JWT> — Verified by the configured auth.Provider. The
+//                     provider knows which secret (or JWKS) backs the
+//                     deployment and normalizes claims into a uniform
+//                     {UserID, OrgID, Email} shape.
 type Auth struct {
-	db        *storage.Postgres
-	jwtSecret []byte
+	db       *storage.Postgres
+	provider auth.Provider
 }
 
-func NewAuth(db *storage.Postgres, jwtSecret string) *Auth {
-	return &Auth{db: db, jwtSecret: []byte(jwtSecret)}
+func NewAuth(db *storage.Postgres, provider auth.Provider) *Auth {
+	return &Auth{db: db, provider: provider}
 }
 
 func (a *Auth) Middleware(next http.Handler) http.Handler {
@@ -54,7 +62,7 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 		}
 		token := parts[1]
 
-		// API key auth (prefixed with rk_)
+		// API key auth (prefixed with rk_).
 		if strings.HasPrefix(token, "rk_") {
 			orgID, err := a.db.ValidateAPIKey(r.Context(), token)
 			if err != nil {
@@ -66,68 +74,30 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// JWT auth (Supabase Auth).
-		//
-		// Pin to HS256 — the only signing method we ever issue or
-		// accept. Without this, jwt-go's default validator accepts
-		// anything advertised in the alg header, which historically
-		// has been the source of "none" and "RS256 → HS256" key
-		// confusion attacks. iss and aud are optional but enforced
-		// when RELIC_JWT_ISSUER / RELIC_JWT_AUDIENCE are set so
-		// self-hosters can pin against their identity provider.
-		if len(a.jwtSecret) > 0 && !isAllZero(a.jwtSecret) {
-			claims := jwt.MapClaims{}
-			parseOpts := []jwt.ParserOption{
-				jwt.WithValidMethods([]string{"HS256"}),
-			}
-			if iss := os.Getenv("RELIC_JWT_ISSUER"); iss != "" {
-				parseOpts = append(parseOpts, jwt.WithIssuer(iss))
-			}
-			if aud := os.Getenv("RELIC_JWT_AUDIENCE"); aud != "" {
-				parseOpts = append(parseOpts, jwt.WithAudience(aud))
-			}
-			parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (any, error) {
-				return a.jwtSecret, nil
-			}, parseOpts...)
-			if err == nil && parsed.Valid {
-				ctx := r.Context()
-				if sub, ok := claims["sub"].(string); ok {
-					ctx = context.WithValue(ctx, CtxUserID, sub)
-				}
-				// org_id may live under app_metadata (Supabase
-				// convention) or as a top-level claim (self-host).
-				// Try both, app_metadata wins when both are present
-				// because it's what the SaaS path issues.
-				if md, ok := claims["app_metadata"].(map[string]any); ok {
-					if orgID, ok := md["org_id"].(string); ok {
-						ctx = context.WithValue(ctx, CtxOrgID, orgID)
-					}
-				}
-				if OrgIDFromContext(ctx) == "" {
-					if orgID, ok := claims["org_id"].(string); ok {
-						ctx = context.WithValue(ctx, CtxOrgID, orgID)
-					}
-				}
-				next.ServeHTTP(w, r.WithContext(ctx))
+		// JWT auth: hand off to the provider for verification.
+		claims, err := a.provider.Verify(r.Context(), token)
+		if err != nil {
+			// Don't leak which factor failed (signature vs expiry vs
+			// audience) — that's a fingerprinting surface for
+			// brute-force attempts against the secret.
+			if errors.Is(err, auth.ErrInvalidToken) || err != nil {
+				writeError(w, http.StatusUnauthorized, "invalid credentials")
 				return
 			}
 		}
-
-		writeError(w, http.StatusUnauthorized, "invalid credentials")
-	})
-}
-
-func isAllZero(b []byte) bool {
-	for _, v := range b {
-		if v != 0 {
-			return false
+		ctx := r.Context()
+		if claims.UserID != "" {
+			ctx = context.WithValue(ctx, CtxUserID, claims.UserID)
 		}
-	}
-	return len(b) == 0 || subtle.ConstantTimeCompare(b, make([]byte, len(b))) == 1
+		if claims.OrgID != "" {
+			ctx = context.WithValue(ctx, CtxOrgID, claims.OrgID)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

@@ -60,7 +60,7 @@ Respond with JSON only, no other text: {"intent": "...", "category": "...", "is_
 		Messages: []anthropic.MessageParam{
 			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 		},
-		Model: anthropic.ModelClaudeSonnet4_5,
+		Model: anthropic.ModelClaude3_7SonnetLatest,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("anthropic API call: %w", err)

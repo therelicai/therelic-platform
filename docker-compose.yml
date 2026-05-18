@@ -13,15 +13,33 @@
 #
 #   POSTGRES_PASSWORD        — pick a real one
 #   MINIO_ROOT_PASSWORD      — same
-#   SUPABASE_JWT_SECRET      — sourced from your Supabase project
+#   RELIC_AUTH_MODE          — local | supabase | oidc (default: supabase
+#                              today, will flip to local once WS-2 lands).
+#                              Picks which auth provider the API verifies
+#                              tokens against, and which optional
+#                              migration folder gets applied.
+#   RELIC_RLS_ENABLED        — when true, apply migrations.rls/ to enable
+#                              row-level security as defense-in-depth.
+#                              The API still filters at the app layer
+#                              regardless; RLS is opt-in extra safety.
+#   SUPABASE_JWT_SECRET      — sourced from your Supabase project. Only
+#                              used when RELIC_AUTH_MODE=supabase.
+#   RELIC_JWT_SECRET         — used when RELIC_AUTH_MODE=local. Generate
+#                              via `openssl rand -hex 32`.
 #   RELIC_TRACE_KEY          — 32-byte hex master secret for HMAC chain
 #                              verification (Slice 6); generate via
 #                              `openssl rand -hex 32`
 #   ALLOWED_ORIGINS          — wherever therelic-app is hosted
 #
-# The `auth.users` stub created by migrate is a Supabase-isms shim;
-# migration 006 references that schema and we don't run Supabase
-# Auth here, so we just create the table empty.
+# Migration layout (applied by the `migrate` one-shot in this order):
+#   migrations/              — core, vanilla Postgres. Always applied.
+#   migrations.supabase/     — only when RELIC_AUTH_MODE=supabase.
+#                              Installs the auth.users trigger that
+#                              binds new Supabase signups to a Relic org.
+#   migrations.rls/          — only when RELIC_RLS_ENABLED=true.
+#                              Row-level security policies. Uses
+#                              request.jwt.claims, which the API sets
+#                              per request via SET LOCAL.
 
 services:
   postgres:
@@ -40,10 +58,15 @@ services:
       timeout: 5s
       retries: 10
 
-  # Apply every SQL file in migrations/ in order. Idempotent — the
-  # migrations are written with `IF NOT EXISTS` / `IF NOT EXISTS`
-  # guards where it matters, so re-running on an existing volume is
-  # a no-op.
+  # Apply migrations in dependency order:
+  #   1. migrations/             core, vanilla Postgres. Always.
+  #   2. migrations.supabase/    only when RELIC_AUTH_MODE=supabase.
+  #   3. migrations.rls/         only when RELIC_RLS_ENABLED=true.
+  #
+  # Idempotent: each applied file is recorded in schema_migrations.
+  # Re-running on an existing volume is a no-op. Folder-namespaced
+  # filenames (e.g. "supabase/001_...") let optional migrations
+  # coexist with core migrations in the same tracking table.
   migrate:
     image: postgres:16-alpine
     depends_on:
@@ -55,17 +78,49 @@ services:
       PGUSER: ${POSTGRES_USER:-relic}
       PGPASSWORD: ${POSTGRES_PASSWORD:-relic}
       PGDATABASE: ${POSTGRES_DB:-therelic}
+      RELIC_AUTH_MODE: ${RELIC_AUTH_MODE:-supabase}
+      RELIC_RLS_ENABLED: ${RELIC_RLS_ENABLED:-false}
     volumes:
       - ./migrations:/migrations:ro
+      - ./migrations.supabase:/migrations.supabase:ro
+      - ./migrations.rls:/migrations.rls:ro
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
-        echo "==> creating auth.users stub for migration 006";
-        psql -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS auth;" \
-                                -c "CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY, email TEXT);";
         echo "==> ensuring schema_migrations tracking table";
         psql -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());";
+
+        # Helper: apply one folder's *.sql files in order, tracking by
+        # "<prefix>/<filename>" so optional folders never collide with
+        # core migrations in schema_migrations.
+        apply_folder() {
+          dir="$$1"; prefix="$$2";
+          for f in "$$dir"/*.sql; do
+            [ -e "$$f" ] || continue;
+            name="$$prefix/$$(basename "$$f")";
+            already=$$(psql -tA -c "SELECT 1 FROM schema_migrations WHERE filename = '$$name'");
+            if [ "$$already" = "1" ]; then
+              echo "==> $$name (already applied)";
+              continue;
+            fi
+            echo "==> $$name";
+            psql -v ON_ERROR_STOP=1 -f "$$f";
+            psql -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations (filename) VALUES ('$$name');";
+          done
+        }
+
+        if [ "$$RELIC_AUTH_MODE" = "supabase" ]; then
+          echo "==> RELIC_AUTH_MODE=supabase: creating auth.users stub for the user-sync trigger";
+          psql -v ON_ERROR_STOP=1 \
+            -c "CREATE SCHEMA IF NOT EXISTS auth;" \
+            -c "CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY, email TEXT, raw_app_meta_data JSONB);";
+        fi
+
+        echo "==> applying core migrations (migrations/)";
+        # Core migrations were historically tracked by bare filename
+        # (e.g. "001_orgs_users_apikeys.sql"). Keep that convention so
+        # existing volumes don't re-apply already-applied core files.
         for f in /migrations/*.sql; do
           name=$$(basename "$$f");
           already=$$(psql -tA -c "SELECT 1 FROM schema_migrations WHERE filename = '$$name'");
@@ -77,6 +132,21 @@ services:
           psql -v ON_ERROR_STOP=1 -f "$$f";
           psql -v ON_ERROR_STOP=1 -c "INSERT INTO schema_migrations (filename) VALUES ('$$name');";
         done
+
+        if [ "$$RELIC_AUTH_MODE" = "supabase" ]; then
+          echo "==> applying Supabase-only migrations (migrations.supabase/)";
+          apply_folder /migrations.supabase supabase;
+        else
+          echo "==> RELIC_AUTH_MODE=$$RELIC_AUTH_MODE: skipping migrations.supabase/";
+        fi
+
+        if [ "$$RELIC_RLS_ENABLED" = "true" ]; then
+          echo "==> RELIC_RLS_ENABLED=true: applying RLS migrations (migrations.rls/)";
+          apply_folder /migrations.rls rls;
+        else
+          echo "==> RELIC_RLS_ENABLED=$$RELIC_RLS_ENABLED: skipping migrations.rls/";
+        fi
+
         echo "==> migrations complete";
 
   # One-shot seeder that creates a dev organization + API key when
@@ -174,7 +244,17 @@ services:
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-relicminio}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-relicminio}
       S3_REGION: us-east-1
+      RELIC_AUTH_MODE: ${RELIC_AUTH_MODE:-supabase}
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:-dev-only-jwt-secret-do-not-use-in-production}
+      # Used when RELIC_AUTH_MODE=local. Generate a real one with
+      # `openssl rand -hex 32` before exposing the API to a network.
+      RELIC_JWT_SECRET: ${RELIC_JWT_SECRET:-dev-only-local-auth-jwt-secret-do-not-use-in-production}
+      # First-boot admin (local mode only). When the users table is
+      # empty, the API creates this admin's org + user so the operator
+      # can log in immediately. After first boot, leave these unset.
+      RELIC_ADMIN_EMAIL: ${RELIC_ADMIN_EMAIL:-}
+      RELIC_ADMIN_PASSWORD: ${RELIC_ADMIN_PASSWORD:-}
+      RELIC_RLS_ENABLED: ${RELIC_RLS_ENABLED:-false}
       # Allows the local therelic-app dev server (vite) and the
       # built static SPA. Override for any other origin.
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:5174,http://localhost:4173}

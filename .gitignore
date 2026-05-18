@@ -1,0 +1,14 @@
+# Secrets + local config
+.env
+.env.local
+.env.bak.*
+
+# Compiled binaries (top-level produced by `go build`)
+/relic-api
+/relic-governance
+*.exe
+
+# Other
+/bin/
+/tmp/
+*.log

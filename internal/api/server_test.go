@@ -8,13 +8,21 @@ import (
 	"testing"
 
 	"github.com/therelicai/therelic-platform/internal/api"
+	"github.com/therelicai/therelic-platform/internal/auth"
 )
 
 // setupTestServer creates a test server with nil db/s3 for testing endpoints
 // that don't require database access (health, CORS, auth rejection).
 func setupTestServer(t *testing.T) http.Handler {
 	t.Helper()
-	srv := api.NewServer(nil, nil, "test-jwt-secret", slog.Default())
+	// Use a Supabase-mode provider with a throwaway secret; the tests
+	// here exercise health/CORS/auth-rejection paths that don't need
+	// the provider to actually validate anything.
+	provider, err := auth.NewSupabaseProvider("test-jwt-secret")
+	if err != nil {
+		t.Fatalf("auth provider: %v", err)
+	}
+	srv := api.NewServer(nil, nil, provider, slog.Default())
 	return srv.Router()
 }
 

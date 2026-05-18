@@ -237,20 +237,45 @@ go run ./cmd/relic-governance
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
-| `S3_ENDPOINT` | S3-compatible endpoint (MinIO, Cloudflare R2, AWS) |
+| `S3_ENDPOINT` | S3-compatible endpoint (MinIO, Cloudflare R2, AWS, B2) |
 | `S3_BUCKET` | Bucket name for trace storage |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | S3 credentials |
+| `RELIC_AUTH_MODE` | `local` / `supabase` / `oidc` (oidc is stubbed in v1) |
+
+#### Auth mode-specific
+
+| Mode | Required env vars |
+|---|---|
+| `local` | `RELIC_JWT_SECRET` (32-byte hex). On first boot, optionally `RELIC_ADMIN_EMAIL` + `RELIC_ADMIN_PASSWORD` to bootstrap an admin. |
+| `supabase` | `SUPABASE_JWT_SECRET` from your Supabase project settings. |
+| `oidc` | _Lands in ROADMAP Phase 1 (SSO/SAML/SCIM)._ |
 
 #### Strongly recommended for production
 
 | Variable | Description |
 |---|---|
-| `SUPABASE_JWT_SECRET` | JWT secret for HS256 dashboard auth |
 | `RELIC_JWT_ISSUER` / `RELIC_JWT_AUDIENCE` | Expected JWT `iss` / `aud` claims |
 | `RELIC_API_KEY_PEPPER` | Server-side pepper for HMAC-SHA256 API key hashing (Slice 3) |
 | `RELIC_TRACE_KEY` | 32-byte hex master secret enabling server-side HMAC chain verification (Slice 6) |
 | `RELIC_REQUIRE_SEALED_TRACES` | `1` to reject uploads missing an HMAC chain |
+| `RELIC_RLS_ENABLED` | `true` to apply opt-in RLS migrations (defense-in-depth) |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origin allowlist |
+
+### Blob storage providers
+
+The storage layer uses pure S3 API (PutObject, GetObject, DeleteObject,
+HeadBucket) with path-style addressing, so any S3-compatible store
+works. Pick one based on cost and where your data should live.
+
+| Provider | `S3_ENDPOINT` | `S3_REGION` | Free tier | Notes |
+|---|---|---|---|---|
+| **MinIO** (Docker) | `http://minio:9000` | `us-east-1` | unlimited (your disk) | Wired into `docker compose` by default. Zero-config local dev. |
+| **Cloudflare R2** | `https://<account>.r2.cloudflarestorage.com` | `auto` | 10 GB storage, 1M class A reads/mo | No egress fees. Recommended for production self-host. |
+| **Backblaze B2** | `https://s3.<region>.backblazeb2.com` | e.g. `us-west-002` | 10 GB storage, 1 GB/day egress | Cheapest pay-as-you-go beyond free tier. |
+| **AWS S3** | _omit (uses AWS default)_ | e.g. `us-east-1` | 5 GB for 12 mo | Standard choice if you're already on AWS. |
+| **Wasabi / Linode Object Storage** | provider-specific | `us-east-1` | varies | Both fully S3-compatible. |
+
+All five work without code changes. Switch providers by editing `.env`.
 
 #### Operational tuning
 

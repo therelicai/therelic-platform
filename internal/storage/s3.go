@@ -90,3 +90,32 @@ func (s *S3) Ping(ctx context.Context) error {
 	})
 	return err
 }
+
+// ListKeys returns every object key in the bucket. Used by the backup
+// command to record what blobs the bundle references. Pagination
+// continues until ContinuationToken is empty (S3 caps each page at
+// 1000). On a large bucket this can be slow; backup is an
+// administrator-triggered operation so latency is acceptable.
+func (s *S3) ListKeys(ctx context.Context) ([]string, error) {
+	var out []string
+	var token *string
+	for {
+		resp, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list S3 keys: %w", err)
+		}
+		for _, obj := range resp.Contents {
+			if obj.Key != nil {
+				out = append(out, *obj.Key)
+			}
+		}
+		if resp.IsTruncated == nil || !*resp.IsTruncated {
+			break
+		}
+		token = resp.NextContinuationToken
+	}
+	return out, nil
+}

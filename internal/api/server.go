@@ -14,6 +14,7 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/therelicai/therelic-platform/internal/api/middleware"
+	"github.com/therelicai/therelic-platform/internal/auth"
 	"github.com/therelicai/therelic-platform/internal/livefeed"
 	"github.com/therelicai/therelic-platform/internal/metrics"
 	"github.com/therelicai/therelic-platform/internal/policyfeed"
@@ -47,10 +48,11 @@ func allowedOriginsFromEnv() []string {
 }
 
 type Server struct {
-	db     *storage.Postgres
-	s3     *storage.S3
-	auth   *middleware.Auth
-	logger *slog.Logger
+	db           *storage.Postgres
+	s3           *storage.S3
+	auth         *middleware.Auth
+	authProvider auth.Provider
+	logger       *slog.Logger
 
 	// traceMasterSecret enables HMAC chain verification of trace
 	// uploads. Empty means "skip verification" — the platform still
@@ -139,11 +141,12 @@ func envTruthy(name string) bool {
 	return false
 }
 
-func NewServer(db *storage.Postgres, s3 *storage.S3, jwtSecret string, logger *slog.Logger) *Server {
+func NewServer(db *storage.Postgres, s3 *storage.S3, provider auth.Provider, logger *slog.Logger) *Server {
 	return &Server{
 		db:                  db,
 		s3:                  s3,
-		auth:                middleware.NewAuth(db, jwtSecret),
+		auth:                middleware.NewAuth(db, provider),
+		authProvider:        provider,
 		logger:              logger,
 		traceMasterSecret:   loadTraceMasterSecret(logger),
 		requireSealedTraces: envTruthy("RELIC_REQUIRE_SEALED_TRACES"),
@@ -275,73 +278,89 @@ func (s *Server) Router() http.Handler {
 	r.Handle("/metrics", metrics.Handler())
 
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(s.auth.Middleware)
+		// Public endpoints: identify the deployment + bootstrap auth.
+		// Mounted outside the auth middleware so an unauthenticated
+		// CLI or app can detect version skew + figure out how to log
+		// in.
+		r.Get("/version", s.handleVersion)
 
-		// Onboarding (explicit org creation)
-		r.Post("/onboard", s.handleOnboard)
+		// /v1/auth/login only mounts in local mode. Supabase / OIDC
+		// users authenticate via their IdP and arrive here with a
+		// token already.
+		if s.authProvider != nil && s.authProvider.Mode() == auth.ModeLocal {
+			r.Post("/auth/login", s.handleAuthLogin)
+		}
 
-		// Traces
-		r.Post("/traces", s.handleUploadTrace)
-		r.Get("/traces", s.handleListTraces)
-		r.Get("/traces/{runID}", s.handleGetTrace)
-		r.Get("/traces/{runID}/events", s.handleGetTraceEvents)
-		r.Delete("/traces/{runID}", s.handleDeleteTrace)
+		// All routes below this require a valid Bearer token.
+		r.Group(func(r chi.Router) {
+			r.Use(s.auth.Middleware)
 
-		// Agents
-		r.Post("/agents", s.handleRegisterAgent)
-		r.Get("/agents", s.handleListAgents)
-		r.Get("/agents/{name}", s.handleGetAgent)
-		r.Get("/agents/{name}/baseline", s.handleGetAgentBaseline)
-		r.Get("/agents/{name}/policy", s.handleGetAgentPolicy)
-		r.Put("/agents/{name}/policy", s.handleUpdateAgentPolicy)
+			// Onboarding (explicit org creation)
+			r.Post("/onboard", s.handleOnboard)
 
-		// Organizations
-		r.Post("/orgs", s.handleCreateOrg)
-		r.Get("/orgs/{orgID}", s.handleGetOrg)
-		r.Post("/orgs/{orgID}/api-keys", s.handleCreateAPIKey)
-		r.Delete("/orgs/{orgID}/api-keys/{keyID}", s.handleRevokeAPIKey)
+			// Traces
+			r.Post("/traces", s.handleUploadTrace)
+			r.Get("/traces", s.handleListTraces)
+			r.Get("/traces/{runID}", s.handleGetTrace)
+			r.Get("/traces/{runID}/events", s.handleGetTraceEvents)
+			r.Delete("/traces/{runID}", s.handleDeleteTrace)
 
-		// User
-		r.Get("/user", s.handleGetUser)
+			// Agents
+			r.Post("/agents", s.handleRegisterAgent)
+			r.Get("/agents", s.handleListAgents)
+			r.Get("/agents/{name}", s.handleGetAgent)
+			r.Get("/agents/{name}/baseline", s.handleGetAgentBaseline)
+			r.Get("/agents/{name}/policy", s.handleGetAgentPolicy)
+			r.Put("/agents/{name}/policy", s.handleUpdateAgentPolicy)
 
-		// Audit
-		r.Get("/audit-events", s.handleListAuditEvents)
+			// Organizations
+			r.Post("/orgs", s.handleCreateOrg)
+			r.Get("/orgs/{orgID}", s.handleGetOrg)
+			r.Post("/orgs/{orgID}/api-keys", s.handleCreateAPIKey)
+			r.Delete("/orgs/{orgID}/api-keys/{keyID}", s.handleRevokeAPIKey)
 
-		// Proposals
-		r.Get("/proposals", s.handleListProposals)
-		r.Get("/proposals/{proposalID}", s.handleGetProposal)
-		r.Post("/proposals/{proposalID}/approve", s.handleApproveProposal)
-		r.Post("/proposals/{proposalID}/reject", s.handleRejectProposal)
-		r.Delete("/proposals/{proposalID}", s.handleDismissProposal)
+			// User
+			r.Get("/user", s.handleGetUser)
 
-		// Registry (Trust Network)
-		r.Get("/registry", s.handleSearchRegistry)
-		r.Post("/registry", s.handlePublishListing)
-		r.Put("/registry/{agentID}", s.handleUpdateListing)
-		r.Delete("/registry/{agentID}", s.handleDeleteListing)
-		r.Get("/registry/{agentID}/trust", s.handleGetTrustScore)
+			// Audit
+			r.Get("/audit-events", s.handleListAuditEvents)
 
-		// Transactions
-		r.Get("/transactions", s.handleListTransactions)
-		r.Get("/transactions/summary", s.handleTransactionSummary)
-		r.Get("/transactions/{txnID}", s.handleGetTransaction)
+			// Proposals
+			r.Get("/proposals", s.handleListProposals)
+			r.Get("/proposals/{proposalID}", s.handleGetProposal)
+			r.Post("/proposals/{proposalID}/approve", s.handleApproveProposal)
+			r.Post("/proposals/{proposalID}/reject", s.handleRejectProposal)
+			r.Delete("/proposals/{proposalID}", s.handleDismissProposal)
 
-		// Policy simulator (Slice 13)
-		r.Post("/policy/simulate", s.handleSimulatePolicy)
-		r.Get("/policy/simulate/{jobID}", s.handleGetSimulateJob)
+			// Registry (Trust Network)
+			r.Get("/registry", s.handleSearchRegistry)
+			r.Post("/registry", s.handlePublishListing)
+			r.Put("/registry/{agentID}", s.handleUpdateListing)
+			r.Delete("/registry/{agentID}", s.handleDeleteListing)
+			r.Get("/registry/{agentID}/trust", s.handleGetTrustScore)
 
-		// Live feed (Slice 14)
-		r.Post("/intents", s.handlePostIntent)
-		r.Get("/orgs/{orgID}/live", s.handleOrgLive)
+			// Transactions
+			r.Get("/transactions", s.handleListTransactions)
+			r.Get("/transactions/summary", s.handleTransactionSummary)
+			r.Get("/transactions/{txnID}", s.handleGetTransaction)
 
-		// Universal policy (Slice 15)
-		r.Post("/policy_sets", s.handleUpsertPolicySet)
-		r.Put("/policy_sets/{id}", s.handleUpsertPolicySet) // upsert-by-name; id is informational
-		r.Get("/policy_sets/{id}", s.handleGetPolicySet)
-		r.Post("/policy_sets/resolve", s.handleResolveSelector)
-		r.Post("/agents/{name}/labels", s.handleSetAgentLabels)
-		r.Post("/agents/{name}/policy_applied", s.handlePolicyApplied)
-		r.Get("/agents/{name}/policy_updates", s.handleAgentPolicyUpdates)
+			// Policy simulator (Slice 13)
+			r.Post("/policy/simulate", s.handleSimulatePolicy)
+			r.Get("/policy/simulate/{jobID}", s.handleGetSimulateJob)
+
+			// Live feed (Slice 14)
+			r.Post("/intents", s.handlePostIntent)
+			r.Get("/orgs/{orgID}/live", s.handleOrgLive)
+
+			// Universal policy (Slice 15)
+			r.Post("/policy_sets", s.handleUpsertPolicySet)
+			r.Put("/policy_sets/{id}", s.handleUpsertPolicySet) // upsert-by-name; id is informational
+			r.Get("/policy_sets/{id}", s.handleGetPolicySet)
+			r.Post("/policy_sets/resolve", s.handleResolveSelector)
+			r.Post("/agents/{name}/labels", s.handleSetAgentLabels)
+			r.Post("/agents/{name}/policy_applied", s.handlePolicyApplied)
+			r.Get("/agents/{name}/policy_updates", s.handleAgentPolicyUpdates)
+		})
 	})
 
 	return r
