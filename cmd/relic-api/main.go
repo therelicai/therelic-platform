@@ -42,6 +42,9 @@ func main() {
 		case "backup", "restore":
 			backupCommand(os.Args[1], os.Args[2:], logger)
 			return
+		case "reset-password":
+			resetPasswordCommand(os.Args[2:], logger)
+			return
 		case "-h", "--help", "help":
 			printUsage()
 			return

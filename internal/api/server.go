@@ -287,8 +287,15 @@ func (s *Server) Router() http.Handler {
 		// /v1/auth/login only mounts in local mode. Supabase / OIDC
 		// users authenticate via their IdP and arrive here with a
 		// token already.
+		//
+		// Wrapped in a strict per-IP rate limiter (burst 5, refills
+		// 1 token every 10 seconds) so the endpoint can't be brute-
+		// forced. The global rate limiter (10/s burst 20) wouldn't
+		// stop a focused login attack — login is the cheapest
+		// admission path so it gets its own bound.
 		if s.authProvider != nil && s.authProvider.Mode() == auth.ModeLocal {
-			r.Post("/auth/login", s.handleAuthLogin)
+			loginLimiter := middleware.NewRateLimiter(0.1, 5)
+			r.With(loginLimiter.Middleware).Post("/auth/login", s.handleAuthLogin)
 		}
 
 		// All routes below this require a valid Bearer token.

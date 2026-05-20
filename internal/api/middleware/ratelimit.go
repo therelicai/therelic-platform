@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -70,24 +71,37 @@ func (rl *RateLimiter) getBucket(key string) *tokenBucket {
 }
 
 // Middleware returns a middleware that rate limits by client IP.
+//
+// Key derivation: r.RemoteAddr is "host:port"; the ephemeral source
+// port changes on every connection so we strip it. X-Forwarded-For
+// wins when set (deployments behind a load balancer must trust the
+// header — terminate it at the LB to prevent spoofing).
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			// Use first IP in chain (client)
-			if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
-				ip = first
-			}
-		}
-
+		ip := clientIP(r)
 		tb := rl.getBucket(ip)
 		if !tb.allow() {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":"rate limit exceeded"}`))
+			_, _ = w.Write([]byte(`{"error":"rate limit exceeded"}`))
 			return
 		}
-
 		next.ServeHTTP(w, r)
 	})
+}
+
+// clientIP returns just the IP portion of the client address. Honors
+// X-Forwarded-For for deployments behind a proxy / load balancer.
+func clientIP(r *http.Request) string {
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
+			return first
+		}
+	}
+	// SplitHostPort fails on bare host (e.g. "10.0.0.1"); fall back
+	// to RemoteAddr verbatim in that case.
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }

@@ -19,9 +19,12 @@
 //   - exact counts (we bucket because exact run counts can be a
 //     business signal).
 //
-// The reporter URL defaults to https://telemetry.therelic.dev/ping
-// (the one host the maintainers operate) but can be overridden via
-// RELIC_TELEMETRY_URL for testing or for users who want to mirror.
+// The reporter URL must be set explicitly via RELIC_TELEMETRY_URL.
+// We don't ship a default endpoint: users who opt in to telemetry
+// either point at a maintainer-hosted collector (when one exists)
+// or at their own self-hosted collector. This keeps the default
+// posture "no data leaves your deployment unless you wired the
+// pipe yourself."
 package telemetry
 
 import (
@@ -38,10 +41,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const (
-	DefaultURL  = "https://telemetry.therelic.dev/ping"
-	pingTimeout = 5 * time.Second
-)
+const pingTimeout = 5 * time.Second
 
 // Reporter sends a single ping at startup and one ping per 24h thereafter.
 type Reporter struct {
@@ -59,10 +59,15 @@ type Reporter struct {
 // is a no-op. The bool return value tells the caller whether to log
 // the opt-in (or its absence).
 func New(pool *pgxpool.Pool, logger *slog.Logger, build, commit, authMode string) (*Reporter, bool) {
-	enabled := isOptedIn(os.Getenv("RELIC_TELEMETRY"))
+	optedIn := isOptedIn(os.Getenv("RELIC_TELEMETRY"))
 	url := strings.TrimSpace(os.Getenv("RELIC_TELEMETRY_URL"))
-	if url == "" {
-		url = DefaultURL
+	// "Enabled" requires BOTH the opt-in flag AND a destination URL.
+	// Without a URL we have nowhere to send to, and we don't ship a
+	// default endpoint (see package doc). A logged warning at boot
+	// catches the case where the operator opted in but forgot the URL.
+	enabled := optedIn && url != ""
+	if optedIn && url == "" {
+		logger.Warn("telemetry: RELIC_TELEMETRY=true but RELIC_TELEMETRY_URL is unset; no pings will be sent")
 	}
 	return &Reporter{
 		pool:    pool,
