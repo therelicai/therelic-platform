@@ -5,7 +5,7 @@ It receives trace uploads from agents, verifies their HMAC chain,
 stores them in Postgres + S3, runs a governance worker that proposes
 policy improvements, and serves the REST API the dashboard reads.
 
-You don't need to run this to use Relic — the OSS runtime is fully
+You don't need to run this to use The Relic — the OSS runtime is fully
 standalone. Run the platform when you want a team dashboard, hosted
 audit log, or governance automation.
 
