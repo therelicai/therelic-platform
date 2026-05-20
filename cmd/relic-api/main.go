@@ -20,6 +20,7 @@ import (
 	"github.com/therelicai/therelic-platform/internal/retention"
 	"github.com/therelicai/therelic-platform/internal/simulate"
 	"github.com/therelicai/therelic-platform/internal/storage"
+	"github.com/therelicai/therelic-platform/internal/observability"
 	"github.com/therelicai/therelic-platform/internal/telemetry"
 	"github.com/therelicai/therelic-platform/internal/version"
 )
@@ -44,6 +45,12 @@ func main() {
 			return
 		case "reset-password":
 			resetPasswordCommand(os.Args[2:], logger)
+			return
+		case "evidence-pack":
+			evidencePackCommand(os.Args[2:], logger)
+			return
+		case "evidence-verify":
+			evidenceVerifyCommand(os.Args[2:], logger)
 			return
 		case "-h", "--help", "help":
 			printUsage()
@@ -120,6 +127,40 @@ func main() {
 			slog.Error("admin bootstrap failed", "error", err)
 			os.Exit(1)
 		}
+	}
+
+	// Optional read replica: when DATABASE_REPLICA_URL is set, build a
+	// second pool. Read handlers that opt into Readonly() target it.
+	if replicaURL := os.Getenv("DATABASE_REPLICA_URL"); replicaURL != "" {
+		replicaPool, err := storage.NewReplicaPool(context.Background(), replicaURL, poolCfg, logger)
+		if err != nil {
+			// Replica failure is fatal — silent fallback would mask a
+			// production misconfig and overload the primary.
+			slog.Error("failed to connect to replica", "error", err)
+			os.Exit(1)
+		}
+		db.WithReplica(replicaPool)
+		defer replicaPool.Close()
+		slog.Info("read replica configured")
+	}
+
+	// OpenTelemetry export. No-op when RELIC_OTEL_ENABLED is unset,
+	// so the API behaves identically to pre-WS-2C deployments.
+	otelCfg := observability.ConfigFromEnv()
+	otelShutdown, err := observability.Setup(context.Background(), otelCfg)
+	if err != nil {
+		slog.Error("otel setup failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := otelShutdown(ctx); err != nil {
+			slog.Warn("otel shutdown", "error", err)
+		}
+	}()
+	if otelCfg.Enabled {
+		slog.Info("otel exporter configured", "endpoint", otelCfg.Endpoint, "service", otelCfg.ServiceName)
 	}
 
 	simulator := simulate.NewRunner(db, s3Client, logger)
@@ -240,7 +281,16 @@ func buildAuthProvider() (auth.Provider, error) {
 	case auth.ModeSupabase:
 		return auth.NewSupabaseProvider(os.Getenv("SUPABASE_JWT_SECRET"))
 	case auth.ModeOIDC:
-		return nil, fmt.Errorf("RELIC_AUTH_MODE=oidc is stubbed; lands in ROADMAP Phase 1 (SSO/SAML/SCIM)")
+		return auth.NewOIDCProvider(context.Background(), auth.OIDCConfig{
+			DiscoveryURL:     os.Getenv("RELIC_OIDC_DISCOVERY_URL"),
+			ClientID:         os.Getenv("RELIC_OIDC_CLIENT_ID"),
+			ClientSecret:     os.Getenv("RELIC_OIDC_CLIENT_SECRET"),
+			RedirectURL:      os.Getenv("RELIC_OIDC_REDIRECT_URL"),
+			DefaultOrgID:     os.Getenv("RELIC_OIDC_DEFAULT_ORG_ID"),
+			DefaultRole:      os.Getenv("RELIC_OIDC_DEFAULT_ROLE"),
+			SessionJWTSecret: os.Getenv("RELIC_JWT_SECRET"),
+			SessionTTL:       durationEnv("RELIC_JWT_TTL", 0),
+		})
 	default:
 		return nil, fmt.Errorf("unhandled auth mode %q", mode)
 	}

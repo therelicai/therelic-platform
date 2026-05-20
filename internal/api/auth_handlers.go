@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/therelicai/therelic-platform/internal/auth"
+	otelexp "github.com/therelicai/therelic-platform/internal/integrations/otel"
 )
 
 type loginRequest struct {
@@ -64,10 +65,12 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u == nil {
+		otelexp.EmitAuthLogin(r.Context(), "", "", "local", false)
 		writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 	if err := auth.VerifyPassword(u.PasswordHash, req.Password); err != nil {
+		otelexp.EmitAuthLogin(r.Context(), u.OrgID, u.ID, "local", false)
 		writeJSONError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -90,6 +93,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	otelexp.EmitAuthLogin(r.Context(), u.OrgID, u.ID, "local", true)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(loginResponse{

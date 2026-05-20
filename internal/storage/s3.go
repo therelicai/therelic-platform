@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -77,6 +78,40 @@ func (s *S3) Delete(ctx context.Context, key string) error {
 		Key:    aws.String(key),
 	})
 	return err
+}
+
+// StreamObject downloads an S3 object and copies it to w. Returns the
+// number of bytes written. Used by `relic-api backup --include-blobs`
+// to fold every object into the tarball without staging the bucket on
+// local disk first.
+func (s *S3) StreamObject(ctx context.Context, key string, w io.Writer) (int64, error) {
+	rc, err := s.Download(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	defer rc.Close()
+	return io.Copy(w, rc)
+}
+
+// PresignGet returns a pre-signed GetObject URL valid for ttl. Used
+// by the trace-download handler (WS-2E) to redirect the client to S3
+// directly instead of streaming through the API process.
+func (s *S3) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	pre := s3.NewPresignClient(s.client)
+	req, err := pre.PresignGetObject(ctx,
+		&s3.GetObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(key),
+		},
+		s3.WithPresignExpires(ttl),
+	)
+	if err != nil {
+		return "", fmt.Errorf("presign get: %w", err)
+	}
+	return req.URL, nil
 }
 
 // Ping verifies the bucket exists and credentials work. Used by

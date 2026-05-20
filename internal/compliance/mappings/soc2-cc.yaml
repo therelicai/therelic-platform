@@ -1,0 +1,202 @@
+framework: SOC 2 Common Criteria
+version: "2017 with 2022 Points of Focus"
+controls:
+  - id: CC1.1
+    name: Demonstrates Commitment to Integrity and Ethical Values
+    relic_satisfies:
+      - capability: governance_documentation
+        evidence:
+          - kind: docs
+            path: README.md
+          - kind: docs
+            path: docs/THREAT_MODEL.md
+        notes: |
+          Trust pillars and lab-resistance thesis documented in the
+          README; threat model published in docs/THREAT_MODEL.md.
+    coverage: partial
+
+  - id: CC2.1
+    name: Internal Communication of Objectives
+    relic_satisfies:
+      - capability: documented_objectives
+        evidence:
+          - kind: docs
+            path: docs/ARCHITECTURE.md
+    coverage: partial
+
+  - id: CC5.1
+    name: Selects and Develops Control Activities
+    relic_satisfies:
+      - capability: policy_engine
+        evidence:
+          - kind: code
+            path: internal/policy
+          - kind: code
+            path: internal/api/policy_sets.go
+    coverage: complete
+
+  - id: CC5.2
+    name: Selects and Develops General Controls Over Technology
+    relic_satisfies:
+      - capability: rate_limiting
+        evidence:
+          - kind: code
+            path: internal/api/middleware/ratelimit.go
+      - capability: security_headers
+        evidence:
+          - kind: code
+            path: internal/api/middleware/security_headers.go
+    coverage: complete
+
+  - id: CC6.1
+    name: Logical and Physical Access Controls
+    relic_satisfies:
+      - capability: authentication
+        evidence:
+          - kind: code
+            path: internal/api/middleware/auth.go
+          - kind: code
+            path: internal/auth
+        notes: |
+          Local + Supabase + OIDC adapters all verify bearer tokens on
+          every request. Rate limiting on /v1/auth/login prevents
+          brute force.
+      - capability: rbac
+        evidence:
+          - kind: code
+            path: migrations/006_audit_invitations.sql
+        notes: |
+          Org membership is the v1 authorization gate. Role-based
+          gating (member vs admin) lands in Phase 2.
+    coverage: complete
+
+  - id: CC6.2
+    name: New User Registration and Authorization
+    relic_satisfies:
+      - capability: provisioning
+        evidence:
+          - kind: code
+            path: internal/api/identity_handlers.go
+          - kind: docs
+            path: migrations/016_identity_config.sql
+        notes: |
+          Identity surface (WS-1E) lets admins mint SCIM tokens, send
+          invites, configure SSO. SCIM tokens are HMAC-hashed at rest.
+    coverage: complete
+
+  - id: CC6.3
+    name: Removes Access When Appropriate
+    relic_satisfies:
+      - capability: session_revocation
+        evidence:
+          - kind: code
+            path: migrations/016_identity_config.sql
+        notes: |
+          Sessions table + revoked_at column. Admin can revoke a
+          single session or all sessions for a user.
+    coverage: complete
+
+  - id: CC6.6
+    name: Restricts Logical Access via Encryption
+    relic_satisfies:
+      - capability: tls_termination
+        evidence:
+          - kind: code
+            path: internal/api/middleware/security_headers.go
+        notes: |
+          HSTS preload + Secure cookies. TLS terminated at Fly.io
+          (production) or operator's reverse proxy (self-host).
+    coverage: complete
+
+  - id: CC6.7
+    name: Restricts the Transmission, Movement, and Removal of Information
+    relic_satisfies:
+      - capability: trace_integrity
+        evidence:
+          - kind: code
+            path: internal/trace
+        notes: |
+          Trace upload path verifies HMAC chains end-to-end.
+      - capability: csrf_protection
+        evidence:
+          - kind: code
+            path: internal/api/middleware/csrf.go
+    coverage: complete
+
+  - id: CC6.8
+    name: Prevents and Detects Unauthorized Software
+    relic_satisfies:
+      - capability: policy_enforcement
+        evidence:
+          - kind: code
+            path: internal/policyfeed
+        notes: |
+          Policy decisions are recorded in audit_events. Live feed
+          publishes proposals for human review before enforcement
+          changes apply.
+    coverage: partial
+
+  - id: CC7.1
+    name: Detects Configuration Changes
+    relic_satisfies:
+      - capability: audit_logging
+        evidence:
+          - kind: code
+            path: internal/api/audit.go
+        notes: |
+          Every mutation writes an audit_events row with user, action,
+          resource, and metadata.
+    coverage: complete
+
+  - id: CC7.2
+    name: Monitors System Components for Anomalies
+    relic_satisfies:
+      - capability: observability
+        evidence:
+          - kind: code
+            path: internal/observability/otel.go
+          - kind: code
+            path: internal/metrics
+          - kind: docs
+            path: docs/SLO.md
+    coverage: complete
+
+  - id: CC7.3
+    name: Evaluates Security Events to Determine Whether They Could Result in a Failure of Security
+    relic_satisfies:
+      - capability: live_feed
+        evidence:
+          - kind: code
+            path: internal/livefeed
+    coverage: partial
+
+  - id: CC8.1
+    name: Authorizes, Designs, Develops, or Acquires, Implements, Configures, and Documents Changes
+    relic_satisfies:
+      - capability: change_management
+        evidence:
+          - kind: docs
+            path: CHANGELOG.md
+          - kind: docs
+            path: docs/BUILD_PLAN.md
+    coverage: partial
+
+  - id: CC9.1
+    name: Identifies, Selects, and Develops Risk Mitigation Activities
+    relic_satisfies:
+      - capability: backup
+        evidence:
+          - kind: code
+            path: cmd/relic-api/backup.go
+          - kind: docs
+            path: docs/HA.md
+    coverage: complete
+
+  - id: CC9.2
+    name: Assesses and Manages Risks Associated With Vendors and Business Partners
+    relic_satisfies:
+      - capability: vendor_documentation
+        evidence:
+          - kind: docs
+            path: docs/HA.md
+    coverage: partial

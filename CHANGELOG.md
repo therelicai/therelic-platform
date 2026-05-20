@@ -10,6 +10,67 @@ Cross-repo contracts referenced from entries below live in
 
 ## [Unreleased]
 
+### Added — Enterprise build (WS-1A, WS-1E, WS-2A-E, WS-3A-B, WS-4A, WS-5)
+
+- **WS-1A · OIDC adapter** — `internal/auth/oidc.go` implements the
+  full PKCE authorization-code flow against any OIDC IdP
+  (Google/Okta/Entra/Auth0). Verifies ID-token signature, audience,
+  issuer, nonce. HTTP surface: `GET /v1/auth/oidc/login`,
+  `GET /v1/auth/oidc/callback`, `POST /v1/auth/oidc/logout`. Issues
+  HS256 session tokens so the existing middleware path stays unchanged.
+  `cmd/relic-api/main.go` wires `RELIC_AUTH_MODE=oidc`.
+- **WS-1E · Identity surface** — migration `016_identity_config.sql`
+  adds `sso_configs`, `scim_tokens`, `identity_invites`, and
+  `sessions` tables. `internal/storage/identity.go` provides typed
+  helpers; `internal/api/identity_handlers.go` mounts the
+  `/v1/orgs/:id/identity/*` surface (SSO read/write, SCIM mint+revoke,
+  invites, session list+revoke). Client-secret column is HMAC-
+  enveloped at rest with `RELIC_SECRETS_KEY`.
+- **WS-2D · Security headers + CSRF** — new middlewares in
+  `internal/api/middleware/security_headers.go` and `csrf.go`. HSTS,
+  X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+  Permissions-Policy, COOP, CORP. CSRF via double-submit cookie;
+  exempts API-key clients and sessionless requests so the CLI keeps
+  working.
+- **WS-2B · Backup completeness** — `relic-api backup --include-blobs`
+  copies every S3 object into the tarball; `relic-api restore` pushes
+  blobs back when present. `internal/storage/s3.go` adds `StreamObject`.
+- **WS-2E · Signed-URL S3 access** — `GET /v1/traces/:id/events`
+  redirects to a 5-min pre-signed R2 URL by default. `?inline=1`
+  keeps the legacy stream-through-Go path for the OSS CLI.
+  `internal/storage/s3.go` adds `PresignGet`.
+- **WS-2A · Load test scaffolding** — `test/load/*.js` k6 scenarios
+  (ingest sustained, burst, gateway concurrency, auth login rate
+  limit, mixed realistic). `setup.sh` / `teardown.sh` provision a
+  dedicated load-test Fly app. `docs/PERFORMANCE.md` + history file.
+- **WS-2C · HA + observability** — `internal/storage/replica.go`
+  adds optional `DATABASE_REPLICA_URL` routing via `db.Readonly()`.
+  `internal/observability/otel.go` boots OTLP/HTTP exporters when
+  `RELIC_OTEL_ENABLED=true`; no-op otherwise. New docs: `docs/HA.md`,
+  `docs/SLO.md`.
+- **WS-3A · Control mapping engine** — `internal/compliance/loader.go`
+  loads YAML mappings under `internal/compliance/mappings/`
+  (SOC 2 CC, ISO 27001, HIPAA §164). Every evidence path is validated
+  against the working tree at load time so CI catches a broken
+  reference. `docs/COMPLIANCE_MAPPINGS.md`.
+- **WS-3B · Evidence pack export** — `internal/compliance/evidence.go`
+  assembles a signed tarball (manifest, controls snapshot, audit log,
+  policy history, RBAC changes, run records, chain verification).
+  `internal/compliance/sign.go` provides HMAC-SHA256 signing
+  (`Signer` interface; GPG slot reserved for v1). CLI:
+  `relic-api evidence-pack` + `evidence-verify`. New storage helpers:
+  `ListAuditEventsInWindow`, `ListRunsInWindow`. `docs/EVIDENCE_PACK.md`.
+- **WS-4A · OTEL exporter** — `internal/integrations/otel/exporter.go`
+  exposes `EmitPolicyDecision`, `EmitTraceIngest`, `EmitAuthLogin`;
+  wired into trace upload + auth handlers. `docs/OTEL.md` documents
+  per-backend snippets for Splunk, Datadog, Honeycomb, Elastic,
+  New Relic, Grafana Cloud.
+- **WS-5 · Hosting** — `fly.production.toml` (prod-only config),
+  `ops/runbook.md`, `ops/deploy.sh`, `ops/migrate.sh`,
+  `ops/rollback.sh`, `.github/workflows/deploy-api.yml`. Live deploy
+  itself requires Fly/Cloudflare/Neon/R2 credentials and is not
+  exercised here.
+
 ### Added — Slice 15: Universal policy enforcement
 
 - **New migration `012_policy_sets_labels.sql`** — `policy_sets` table

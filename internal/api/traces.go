@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	otelexp "github.com/therelicai/therelic-platform/internal/integrations/otel"
 	"github.com/therelicai/therelic-platform/internal/metrics"
 	"github.com/therelicai/therelic-platform/internal/storage"
 	tracepkg "github.com/therelicai/therelic-platform/internal/trace"
@@ -195,6 +196,7 @@ func (s *Server) handleUploadTrace(w http.ResponseWriter, r *http.Request) {
 		"chain_verified":  summary.ChainVerified,
 	})
 	metrics.TraceUploads.WithLabelValues("accepted").Inc()
+	otelexp.EmitTraceIngest(r.Context(), orgID, agentName, summary.ActionsTotal, 0)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"run_id":          runID,
@@ -263,6 +265,21 @@ func (s *Server) handleGetTraceEvents(w http.ResponseWriter, r *http.Request) {
 	run, err := s.db.GetRun(r.Context(), orgID, runID)
 	if err != nil || run == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "run not found"})
+		return
+	}
+
+	// WS-2E: default to a pre-signed S3 URL so the API process isn't
+	// on the data path for large traces. The OSS CLI (which can't
+	// follow cross-host redirects with credentials reattached) passes
+	// ?inline=1 to keep the legacy stream-through-Go path.
+	if r.URL.Query().Get("inline") != "1" {
+		signed, err := s.s3.PresignGet(r.Context(), run.StorageKey, 5*time.Minute)
+		if err != nil {
+			s.logger.Error("failed to presign trace url", "error", err, "run_id", runID)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "storage error"})
+			return
+		}
+		http.Redirect(w, r, signed, http.StatusFound)
 		return
 	}
 

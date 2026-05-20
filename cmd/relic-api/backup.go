@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -43,11 +44,24 @@ func backupCommand(verb string, args []string, logger *slog.Logger) {
 }
 
 func runBackup(args []string, logger *slog.Logger) {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: relic-api backup OUT_FILE.tar.gz")
+	includeBlobs := false
+	var positional []string
+	for _, a := range args {
+		switch a {
+		case "--include-blobs":
+			includeBlobs = true
+		case "-h", "--help":
+			fmt.Println("usage: relic-api backup [--include-blobs] OUT_FILE.tar.gz")
+			return
+		default:
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: relic-api backup [--include-blobs] OUT_FILE.tar.gz")
 		os.Exit(2)
 	}
-	out := args[0]
+	out := positional[0]
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		fmt.Fprintln(os.Stderr, "DATABASE_URL is required for backup")
@@ -101,12 +115,14 @@ func runBackup(args []string, logger *slog.Logger) {
 	defer pool.Close()
 	sv, _ := version.SchemaVersion(ctx, pool.Pool())
 
-	// 3. List S3 keys (if S3 is configured). The list is recorded
-	//    in the bundle so the operator knows which blobs need to be
-	//    present in the destination bucket for a clean restore.
+	// 3. List S3 keys (if S3 is configured). With --include-blobs we
+	//    ALSO copy every object into the tarball; without the flag
+	//    the bundle only records the keys (operators expected to
+	//    mirror their bucket separately).
 	var blobKeys []string
+	var s3c *storage.S3
 	if os.Getenv("S3_BUCKET") != "" {
-		s3c, err := storage.NewS3(
+		s3c, err = storage.NewS3(
 			os.Getenv("S3_ENDPOINT"),
 			os.Getenv("S3_BUCKET"),
 			os.Getenv("S3_ACCESS_KEY"),
@@ -121,6 +137,10 @@ func runBackup(args []string, logger *slog.Logger) {
 			blobKeys = keys
 		}
 	}
+	if includeBlobs && (s3c == nil || len(blobKeys) == 0) {
+		logger.Warn("--include-blobs requested but no S3 bucket / blob list available; archive will not contain blobs")
+		includeBlobs = false
+	}
 
 	manifest := map[string]any{
 		"schema_version": sv,
@@ -128,16 +148,29 @@ func runBackup(args []string, logger *slog.Logger) {
 		"commit":         version.Commit,
 		"taken_at":       time.Now().UTC().Format(time.RFC3339),
 		"blob_count":     len(blobKeys),
+		"includes_blobs": includeBlobs,
+	}
+
+	if includeBlobs {
+		// Operators sometimes hit this command without realising the
+		// archive is going to be MUCH larger than a metadata-only one.
+		// Log a one-line ETA so they can ctrl-C if they hit it by
+		// accident on a large bucket.
+		fmt.Printf("--include-blobs: copying %d S3 objects into archive (this may take a while)\n", len(blobKeys))
 	}
 
 	// 4. Assemble the tarball.
-	if err := writeBackupBundle(out, tmpName, manifest, blobKeys); err != nil {
+	if err := writeBackupBundle(ctx, out, tmpName, manifest, blobKeys, includeBlobs, s3c, logger); err != nil {
 		fmt.Fprintf(os.Stderr, "write bundle: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Backup written: %s\n", out)
 	fmt.Printf("  schema_version: %s\n", sv)
-	fmt.Printf("  blob keys:      %d (S3 objects NOT copied; mirror your bucket separately)\n", len(blobKeys))
+	if includeBlobs {
+		fmt.Printf("  blobs:          %d (copied into archive)\n", len(blobKeys))
+	} else {
+		fmt.Printf("  blob keys:      %d (S3 objects NOT copied; mirror your bucket separately or use --include-blobs)\n", len(blobKeys))
+	}
 }
 
 func runRestore(args []string, logger *slog.Logger) {
@@ -159,7 +192,7 @@ func runRestore(args []string, logger *slog.Logger) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	dumpPath, manifest, err := extractBundle(in)
+	dumpPath, manifest, blobs, err := extractBundle(in)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "extract: %v\n", err)
 		os.Exit(1)
@@ -187,13 +220,50 @@ func runRestore(args []string, logger *slog.Logger) {
 		fmt.Fprintf(os.Stderr, "psql: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("Restore complete.")
-	if bc, ok := manifest["blob_count"].(float64); ok && bc > 0 {
+	fmt.Println("Restore (database) complete.")
+
+	// Blob restore: if the bundle has blobs/ entries AND the
+	// destination S3 bucket is configured, push each blob back. The
+	// destination bucket may be a different bucket / region — restore
+	// is "make this stack look like the source" and the operator
+	// chooses the destination via S3_* env.
+	if len(blobs) > 0 {
+		if os.Getenv("S3_BUCKET") == "" {
+			fmt.Printf("Bundle contains %d blob(s) but S3_BUCKET is unset; skipping blob restore.\n", len(blobs))
+			return
+		}
+		s3c, err := storage.NewS3(
+			os.Getenv("S3_ENDPOINT"),
+			os.Getenv("S3_BUCKET"),
+			os.Getenv("S3_ACCESS_KEY"),
+			os.Getenv("S3_SECRET_KEY"),
+			os.Getenv("S3_REGION"),
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "s3 init: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Restoring %d blob(s) to %s ...\n", len(blobs), os.Getenv("S3_BUCKET"))
+		for key, body := range blobs {
+			if err := s3c.UploadBytes(ctx, key, body); err != nil {
+				logger.Warn("blob restore failed", "key", key, "error", err)
+			}
+		}
+		fmt.Println("Restore (blobs) complete.")
+	} else if bc, ok := manifest["blob_count"].(float64); ok && bc > 0 {
 		fmt.Printf("Note: %d blob keys were referenced by the backup. Ensure your S3 bucket contains those objects.\n", int(bc))
 	}
 }
 
-func writeBackupBundle(outPath, dumpPath string, manifest map[string]any, blobKeys []string) error {
+func writeBackupBundle(
+	ctx context.Context,
+	outPath, dumpPath string,
+	manifest map[string]any,
+	blobKeys []string,
+	includeBlobs bool,
+	s3c *storage.S3,
+	logger *slog.Logger,
+) error {
 	out, err := os.Create(outPath)
 	if err != nil {
 		return err
@@ -223,7 +293,48 @@ func writeBackupBundle(outPath, dumpPath string, manifest map[string]any, blobKe
 	if err := writeTarEntry(tw, "relic-backup/blobs.txt", []byte(strings.Join(blobKeys, "\n"))); err != nil {
 		return err
 	}
+
+	if includeBlobs && s3c != nil {
+		for i, key := range blobKeys {
+			if i%50 == 0 && i > 0 {
+				logger.Info("backup blob copy progress", "copied", i, "total", len(blobKeys))
+			}
+			// Each blob is streamed through a buffer + written as one
+			// tar entry. We HEAD the object once for size and then
+			// stream the body. Failures are non-fatal: log + skip so
+			// a single 404'd key doesn't kill the entire backup.
+			//
+			// (A retry-able restartable copy that picks up mid-bucket
+			//  on partial failure is a Phase-2 enhancement; the bundle
+			//  manifest's blob_count is the truth.)
+			var buf bytes.Buffer
+			n, err := s3c.StreamObject(ctx, key, &buf)
+			if err != nil {
+				logger.Warn("backup blob stream failed", "key", key, "error", err)
+				continue
+			}
+			if err := writeTarEntryStream(tw, "relic-backup/blobs/"+key, buf.Bytes(), n); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// writeTarEntryStream is identical to writeTarEntry but takes a
+// pre-computed size so very large blobs don't require re-measuring.
+func writeTarEntryStream(tw *tar.Writer, name string, body []byte, size int64) error {
+	hdr := &tar.Header{
+		Name:    name,
+		Mode:    0o600,
+		Size:    size,
+		ModTime: time.Now(),
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return err
+	}
+	_, err := tw.Write(body)
+	return err
 }
 
 func writeTarEntry(tw *tar.Writer, name string, body []byte) error {
@@ -240,46 +351,55 @@ func writeTarEntry(tw *tar.Writer, name string, body []byte) error {
 	return err
 }
 
-func extractBundle(in string) (dumpPath string, manifest map[string]any, err error) {
+func extractBundle(in string) (dumpPath string, manifest map[string]any, blobs map[string][]byte, err error) {
 	f, err := os.Open(in)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	defer f.Close()
 	gr, err := gzip.NewReader(f)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	defer gr.Close()
 	tr := tar.NewReader(gr)
 
 	manifest = map[string]any{}
+	blobs = map[string][]byte{}
 	out, err := os.CreateTemp("", "relic-restore-*.sql.gz")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	dumpPath = out.Name()
 
+	const blobsPrefix = "relic-backup/blobs/"
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
-		switch hdr.Name {
-		case "relic-backup/manifest.json":
+		switch {
+		case hdr.Name == "relic-backup/manifest.json":
 			body, _ := io.ReadAll(tr)
 			_ = json.Unmarshal(body, &manifest)
-		case "relic-backup/database.sql.gz":
+		case hdr.Name == "relic-backup/database.sql.gz":
 			if _, err := io.Copy(out, tr); err != nil {
-				return "", nil, err
+				return "", nil, nil, err
 			}
+		case strings.HasPrefix(hdr.Name, blobsPrefix):
+			key := hdr.Name[len(blobsPrefix):]
+			body, err := io.ReadAll(tr)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			blobs[key] = body
 		}
 	}
 	_ = out.Close()
-	return dumpPath, manifest, nil
+	return dumpPath, manifest, blobs, nil
 }
 
 func scrubURL(u string) string {

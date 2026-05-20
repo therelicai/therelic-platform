@@ -41,6 +41,15 @@ const (
 	auditPolicySimulate auditAction = "policy.simulate"
 	auditPolicySetWrite auditAction = "policy_set.write"
 	auditAgentLabels    auditAction = "agent.labels"
+
+	// Identity surface (WS-1E).
+	auditSSOUpdate        auditAction = "identity.sso.update"
+	auditSCIMTokenCreate  auditAction = "identity.scim_token.create"
+	auditSCIMTokenRevoke  auditAction = "identity.scim_token.revoke"
+	auditInviteCreate     auditAction = "identity.invite.create"
+	auditInviteCancel     auditAction = "identity.invite.cancel"
+	auditSessionRevoke    auditAction = "identity.session.revoke"
+	auditSessionRevokeAll auditAction = "identity.session.revoke_all"
 )
 
 // auditLog records an audit row and never fails the caller. Mutations

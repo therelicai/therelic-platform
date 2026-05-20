@@ -1,0 +1,190 @@
+framework: ISO/IEC 27001 Annex A
+version: "2022"
+controls:
+  - id: A.5.1
+    name: Policies for information security
+    relic_satisfies:
+      - capability: policy_engine
+        evidence:
+          - kind: code
+            path: internal/policy
+          - kind: code
+            path: internal/api/policy_sets.go
+    coverage: complete
+
+  - id: A.5.7
+    name: Threat intelligence
+    relic_satisfies:
+      - capability: threat_model
+        evidence:
+          - kind: docs
+            path: docs/THREAT_MODEL.md
+    coverage: complete
+
+  - id: A.5.10
+    name: Acceptable use of information and other associated assets
+    relic_satisfies:
+      - capability: agent_policy
+        evidence:
+          - kind: code
+            path: internal/api/policy_sets.go
+    coverage: complete
+
+  - id: A.5.15
+    name: Access control
+    relic_satisfies:
+      - capability: authentication
+        evidence:
+          - kind: code
+            path: internal/api/middleware/auth.go
+          - kind: code
+            path: internal/auth
+    coverage: complete
+
+  - id: A.5.16
+    name: Identity management
+    relic_satisfies:
+      - capability: identity_management
+        evidence:
+          - kind: code
+            path: internal/api/identity_handlers.go
+          - kind: code
+            path: internal/storage/identity.go
+    coverage: complete
+
+  - id: A.5.17
+    name: Authentication information
+    relic_satisfies:
+      - capability: credential_storage
+        evidence:
+          - kind: code
+            path: internal/auth/local.go
+        notes: bcrypt for passwords; HMAC pepper for API keys.
+    coverage: complete
+
+  - id: A.5.18
+    name: Access rights
+    relic_satisfies:
+      - capability: provisioning
+        evidence:
+          - kind: code
+            path: internal/api/identity_handlers.go
+          - kind: code
+            path: migrations/016_identity_config.sql
+    coverage: complete
+
+  - id: A.5.23
+    name: Information security for use of cloud services
+    relic_satisfies:
+      - capability: ha_documentation
+        evidence:
+          - kind: docs
+            path: docs/HA.md
+    coverage: partial
+
+  - id: A.5.30
+    name: ICT readiness for business continuity
+    relic_satisfies:
+      - capability: backup
+        evidence:
+          - kind: code
+            path: cmd/relic-api/backup.go
+          - kind: docs
+            path: docs/HA.md
+    coverage: complete
+
+  - id: A.8.1
+    name: User end point devices
+    relic_satisfies:
+      - capability: csrf_protection
+        evidence:
+          - kind: code
+            path: internal/api/middleware/csrf.go
+    coverage: partial
+
+  - id: A.8.2
+    name: Privileged access rights
+    relic_satisfies:
+      - capability: rbac
+        evidence:
+          - kind: code
+            path: migrations/016_identity_config.sql
+    coverage: partial
+
+  - id: A.8.5
+    name: Secure authentication
+    relic_satisfies:
+      - capability: oidc
+        evidence:
+          - kind: code
+            path: internal/auth/oidc.go
+          - kind: code
+            path: internal/api/oidc_handlers.go
+    coverage: complete
+
+  - id: A.8.6
+    name: Capacity management
+    relic_satisfies:
+      - capability: load_testing
+        evidence:
+          - kind: docs
+            path: docs/PERFORMANCE.md
+    coverage: complete
+
+  - id: A.8.7
+    name: Protection against malware
+    relic_satisfies:
+      - capability: policy_enforcement
+        evidence:
+          - kind: code
+            path: internal/policyfeed
+    coverage: partial
+
+  - id: A.8.9
+    name: Configuration management
+    relic_satisfies:
+      - capability: change_management
+        evidence:
+          - kind: docs
+            path: docs/BUILD_PLAN.md
+          - kind: docs
+            path: CHANGELOG.md
+    coverage: partial
+
+  - id: A.8.15
+    name: Logging
+    relic_satisfies:
+      - capability: audit_logging
+        evidence:
+          - kind: code
+            path: internal/api/audit.go
+    coverage: complete
+
+  - id: A.8.16
+    name: Monitoring activities
+    relic_satisfies:
+      - capability: observability
+        evidence:
+          - kind: code
+            path: internal/observability/otel.go
+          - kind: docs
+            path: docs/SLO.md
+    coverage: complete
+
+  - id: A.8.23
+    name: Web filtering
+    relic_satisfies:
+      - capability: policy_enforcement
+        evidence:
+          - kind: code
+            path: internal/policy
+    coverage: partial
+
+  - id: A.8.24
+    name: Use of cryptography
+    relic_satisfies:
+      - capability: trace_integrity
+        evidence:
+          - kind: code
+            path: internal/trace
+    coverage: complete

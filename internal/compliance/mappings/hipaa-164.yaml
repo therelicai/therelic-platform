@@ -1,0 +1,145 @@
+framework: HIPAA Security Rule
+version: "45 CFR §164 (2024)"
+controls:
+  - id: "164.308(a)(1)(ii)(A)"
+    name: Risk Analysis
+    relic_satisfies:
+      - capability: threat_model
+        evidence:
+          - kind: docs
+            path: docs/THREAT_MODEL.md
+    coverage: partial
+
+  - id: "164.308(a)(3)(ii)(B)"
+    name: Workforce Clearance Procedure
+    relic_satisfies:
+      - capability: provisioning
+        evidence:
+          - kind: code
+            path: internal/api/identity_handlers.go
+    coverage: partial
+
+  - id: "164.308(a)(4)(ii)(B)"
+    name: Access Authorization
+    relic_satisfies:
+      - capability: rbac
+        evidence:
+          - kind: code
+            path: internal/api/middleware/auth.go
+    coverage: partial
+
+  - id: "164.308(a)(5)(ii)(C)"
+    name: Log-in Monitoring
+    relic_satisfies:
+      - capability: audit_logging
+        evidence:
+          - kind: code
+            path: internal/api/audit.go
+    coverage: complete
+
+  - id: "164.308(a)(7)(ii)(A)"
+    name: Data Backup Plan
+    relic_satisfies:
+      - capability: backup
+        evidence:
+          - kind: code
+            path: cmd/relic-api/backup.go
+    coverage: complete
+
+  - id: "164.310(a)(1)"
+    name: Facility Access Controls
+    relic_satisfies:
+      - capability: hosting_documentation
+        evidence:
+          - kind: docs
+            path: docs/HA.md
+    coverage: not_applicable
+
+  - id: "164.310(d)(1)"
+    name: Device and Media Controls
+    relic_satisfies:
+      - capability: blob_lifecycle
+        evidence:
+          - kind: code
+            path: internal/retention
+    coverage: complete
+
+  - id: "164.312(a)(1)"
+    name: Access Control
+    relic_satisfies:
+      - capability: authentication
+        evidence:
+          - kind: code
+            path: internal/auth
+          - kind: code
+            path: internal/api/middleware/auth.go
+    coverage: complete
+
+  - id: "164.312(a)(2)(iii)"
+    name: Automatic Logoff
+    relic_satisfies:
+      - capability: session_ttl
+        evidence:
+          - kind: code
+            path: internal/auth/local.go
+        notes: |
+          Session JWTs expire after RELIC_JWT_TTL (default 24h). Admin
+          revocation via the sessions table closes the gap when 24h is
+          too long.
+    coverage: complete
+
+  - id: "164.312(b)"
+    name: Audit Controls
+    relic_satisfies:
+      - capability: audit_logging
+        evidence:
+          - kind: code
+            path: internal/api/audit.go
+    coverage: complete
+
+  - id: "164.312(c)(1)"
+    name: Integrity
+    relic_satisfies:
+      - capability: trace_integrity
+        evidence:
+          - kind: code
+            path: internal/trace
+    coverage: complete
+
+  - id: "164.312(d)"
+    name: Person or Entity Authentication
+    relic_satisfies:
+      - capability: oidc
+        evidence:
+          - kind: code
+            path: internal/auth/oidc.go
+    coverage: complete
+
+  - id: "164.312(e)(1)"
+    name: Transmission Security
+    relic_satisfies:
+      - capability: tls_termination
+        evidence:
+          - kind: code
+            path: internal/api/middleware/security_headers.go
+    coverage: complete
+
+  - id: "164.314(a)(1)"
+    name: Business Associate Contracts
+    relic_satisfies:
+      - capability: vendor_documentation
+        evidence:
+          - kind: docs
+            path: README.md
+    coverage: not_applicable
+
+  - id: "164.316(b)(1)"
+    name: Documentation
+    relic_satisfies:
+      - capability: governance_documentation
+        evidence:
+          - kind: docs
+            path: docs/ARCHITECTURE.md
+          - kind: docs
+            path: CHANGELOG.md
+    coverage: complete

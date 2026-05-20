@@ -20,7 +20,8 @@ import (
 )
 
 type Postgres struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	replica *pgxpool.Pool // optional read-only replica; nil = reads go to primary
 }
 
 // PoolConfig controls the pgxpool we construct. Each field maps onto a
@@ -739,6 +740,65 @@ func (p *Postgres) ListAuditEvents(ctx context.Context, orgID string, limit, off
 		events = append(events, e)
 	}
 	return events, nil
+}
+
+// ListAuditEventsInWindow returns audit events for an org within
+// [start, end). Used by the evidence-pack export to scope an audit
+// log to a compliance period. Ordered by created_at ASC so the pack
+// reads chronologically.
+func (p *Postgres) ListAuditEventsInWindow(ctx context.Context, orgID string, start, end time.Time) ([]AuditEvent, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, org_id, user_id, action, resource, resource_id, metadata, created_at
+		 FROM audit_events
+		 WHERE org_id = $1 AND created_at >= $2 AND created_at < $3
+		 ORDER BY created_at ASC`,
+		orgID, start, end,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list audit events window: %w", err)
+	}
+	defer rows.Close()
+	var events []AuditEvent
+	for rows.Next() {
+		var e AuditEvent
+		if err := rows.Scan(&e.ID, &e.OrgID, &e.UserID, &e.Action, &e.Resource, &e.ResourceID, &e.Metadata, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan audit event: %w", err)
+		}
+		events = append(events, e)
+	}
+	return events, nil
+}
+
+// ListRunsInWindow returns runs for an org within [start, end).
+// Used by the evidence-pack export to capture which agent runs
+// happened during the compliance period.
+func (p *Postgres) ListRunsInWindow(ctx context.Context, orgID string, start, end time.Time) ([]Run, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT id, org_id, agent_name, agent_version, policy_hash, environment,
+		        started_at, duration_ms, exit_code,
+		        actions_total, actions_allowed, actions_denied,
+		        storage_key, expires_at, integrity_chain, chain_verified, truncated
+		 FROM runs
+		 WHERE org_id = $1 AND started_at >= $2 AND started_at < $3
+		 ORDER BY started_at ASC`,
+		orgID, start, end,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list runs window: %w", err)
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		var r Run
+		if err := rows.Scan(&r.ID, &r.OrgID, &r.AgentName, &r.AgentVersion, &r.PolicyHash, &r.Environment,
+			&r.StartedAt, &r.DurationMs, &r.ExitCode,
+			&r.ActionsTotal, &r.ActionsAllowed, &r.ActionsDenied,
+			&r.StorageKey, &r.ExpiresAt, &r.IntegrityChain, &r.ChainVerified, &r.Truncated); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func (p *Postgres) ListOrgs(ctx context.Context) ([]string, error) {

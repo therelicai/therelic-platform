@@ -1,0 +1,50 @@
+# fly.production.toml — production deploy for api.therelic.dev.
+#
+# Distinct from fly.toml so the dev/staging app config doesn't accidentally
+# leak into prod. CI's deploy-api.yml workflow always passes
+# --config fly.production.toml.
+#
+# Secrets are NOT in this file. Set via `flyctl secrets set --app=therelic-api`.
+
+app = "therelic-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  # All secret values come from `flyctl secrets`. Non-secret defaults
+  # live here so a fresh deploy boots with sensible production settings.
+  RELIC_AUTH_MODE = "oidc"
+  RELIC_RETENTION_INTERVAL = "1h"
+  RELIC_PG_MAX_CONNS = "30"
+  RELIC_PG_MIN_CONNS = "5"
+  ALLOWED_ORIGINS = "https://app.therelic.dev"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 1                 # always keep one warm; latency budget can't take a cold start
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 200
+    soft_limit = 100
+
+  [[http_service.checks]]
+    grace_period = "10s"
+    interval = "10s"
+    method = "GET"
+    path = "/readyz"
+    timeout = "3s"
+
+# Single VM type, two replicas in prod. Scale up via
+# `flyctl scale count 4 --app=therelic-api` when load warrants.
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

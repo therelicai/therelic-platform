@@ -265,6 +265,21 @@ func (s *Server) Router() http.Handler {
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Compress(5))
 
+	// Security headers run before route dispatch so even 404s carry
+	// the hardening response headers a scanner expects. CSRF runs
+	// after, so /health + /readyz + /metrics (which the orchestrator
+	// hits without a cookie) stay reachable. The OIDC callback is
+	// exempt — the user arrives there before any same-origin cookie
+	// is set.
+	r.Use(middleware.SecurityHeaders)
+	cookieSecure := !envTruthy("RELIC_COOKIES_INSECURE_DEV")
+	csrf := middleware.NewCSRF(cookieSecure,
+		"/v1/auth/oidc/callback",
+		"/v1/auth/oidc/login",
+		"/v1/auth/oidc/logout",
+	)
+	r.Use(csrf.Middleware)
+
 	// Cheap liveness probe — the process is up and the router can
 	// serve. Distinct from /readyz, which checks downstream deps.
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -298,6 +313,18 @@ func (s *Server) Router() http.Handler {
 			r.With(loginLimiter.Middleware).Post("/auth/login", s.handleAuthLogin)
 		}
 
+		// OIDC PKCE flow. Mounts only in oidc mode. /login generates
+		// state+nonce+verifier and redirects to the IdP; /callback
+		// verifies the ID-token and issues a Relic session token;
+		// /logout clears the session cookie. Same kind of rate limit
+		// as local login so an attacker can't grind the flow.
+		if s.authProvider != nil && s.authProvider.Mode() == auth.ModeOIDC {
+			oidcLimiter := middleware.NewRateLimiter(0.5, 10)
+			r.With(oidcLimiter.Middleware).Get("/auth/oidc/login", s.handleOIDCLogin)
+			r.With(oidcLimiter.Middleware).Get("/auth/oidc/callback", s.handleOIDCCallback)
+			r.Post("/auth/oidc/logout", s.handleOIDCLogout)
+		}
+
 		// All routes below this require a valid Bearer token.
 		r.Group(func(r chi.Router) {
 			r.Use(s.auth.Middleware)
@@ -325,6 +352,21 @@ func (s *Server) Router() http.Handler {
 			r.Get("/orgs/{orgID}", s.handleGetOrg)
 			r.Post("/orgs/{orgID}/api-keys", s.handleCreateAPIKey)
 			r.Delete("/orgs/{orgID}/api-keys/{keyID}", s.handleRevokeAPIKey)
+
+			// Identity surface (WS-1E): SSO config, SCIM tokens,
+			// invites, active sessions. Cross-org access is blocked
+			// inside each handler via requireMatchingOrg.
+			r.Get("/orgs/{orgID}/identity/sso", s.handleGetSSO)
+			r.Put("/orgs/{orgID}/identity/sso", s.handlePutSSO)
+			r.Get("/orgs/{orgID}/identity/scim-tokens", s.handleListSCIMTokens)
+			r.Post("/orgs/{orgID}/identity/scim-tokens", s.handleCreateSCIMToken)
+			r.Delete("/orgs/{orgID}/identity/scim-tokens/{tokenID}", s.handleRevokeSCIMToken)
+			r.Get("/orgs/{orgID}/identity/invites", s.handleListInvites)
+			r.Post("/orgs/{orgID}/identity/invites", s.handleCreateInvite)
+			r.Delete("/orgs/{orgID}/identity/invites/{inviteID}", s.handleCancelInvite)
+			r.Get("/orgs/{orgID}/identity/sessions", s.handleListSessions)
+			r.Delete("/orgs/{orgID}/identity/sessions/{sessionID}", s.handleRevokeSession)
+			r.Delete("/orgs/{orgID}/identity/sessions", s.handleRevokeSession)
 
 			// User
 			r.Get("/user", s.handleGetUser)
