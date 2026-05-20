@@ -7,17 +7,13 @@ This product includes software developed by third parties; see the
 go.sum manifest in the repository root for the authoritative list of
 direct and transitive dependencies and their respective licenses.
 
-The Licensed Work is provided under the Business Source License 1.1
-(see LICENSE). Non-production use is unrestricted; production use is
-permitted under the Additional Use Grant in the LICENSE file, which
-allows self-hosting and embedding for any purpose other than offering
-a competing hosted Governance Service. Each released file converts to
-the Apache License 2.0 four years after publication.
+The Licensed Work is provided under the Apache License, Version 2.0
+(see LICENSE). You may use, fork, modify, and redistribute this code
+for any purpose, including running a competing hosted service.
 
 The hosted instance of this software at https://api.therelic.dev/ is
-operated by The Relic AI, Inc. and is a separate commercial offering.
+operated by The Relic AI, Inc.
 
 "The Relic" and the Relic shield logo are trademarks of The Relic AI,
-Inc. Neither the Business Source License 1.1 nor the Change License
-grants permission to use these trademarks. See TRADEMARKS.md for
-details.
+Inc. The Apache License 2.0 does not grant permission to use these
+trademarks. See TRADEMARKS.md for details.

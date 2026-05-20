@@ -2,9 +2,10 @@ package trace
 
 // Mirror of the runtime's trace.IntegrityChain / VerifyChain logic.
 // We keep a copy here rather than importing the runtime module
-// because the platform is a separate deployable and a separate
-// license (BSL 1.1 vs Apache); cross-module compilation would force
-// either an awkward shared package or a vendoring relationship.
+// because the platform is a separate Go module; cross-module
+// compilation would force either an awkward shared package or a
+// vendoring relationship. Both modules are Apache 2.0; the only
+// reason for duplication is build hygiene.
 //
 // The wire format is the canonical one the runtime emits via
 // sealEventLine: every event line ends with either

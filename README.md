@@ -1,342 +1,144 @@
 # The Relic Platform
 
-**The self-hostable control plane for [The Relic](https://github.com/therelicai/therelic) — trace storage, audit indexing, governance worker, and policy authority.**
+**The server side of [The Relic](https://github.com/therelicai/therelic).**
+It receives trace uploads from agents, verifies their HMAC chain,
+stores them in Postgres + S3, runs a governance worker that proposes
+policy improvements, and serves the REST API the dashboard reads.
 
-This repo runs the server side of The Relic stack. Trace uploads land here, get parsed + verified, persist into Postgres (metadata) + S3 (raw events), and become queryable by the [therelic-app](https://github.com/therelicai/therelic-app) dashboard. The governance worker scans for policy gaps and proposes new rules for human review.
-
-> **License:** Business Source License 1.1 (BSL 1.1). Source-available,
-> not OSI-open. Self-host for any purpose — internal production use is
-> explicitly permitted by the Additional Use Grant — but you may not
-> run a hosted Governance Service that competes with `api.therelic.dev`.
-> Each released file converts to Apache License 2.0 four years after
-> publication. See [LICENSE](./LICENSE), [NOTICE](./NOTICE), and
-> [TRADEMARKS.md](./TRADEMARKS.md).
+You don't need to run this to use Relic — the OSS runtime is fully
+standalone. Run the platform when you want a team dashboard, hosted
+audit log, or governance automation.
 
 ---
 
-## Quickstart — self-host the whole stack
+## Get started in 5 minutes
+
+Requires Docker (Desktop or any compatible runtime).
 
 ```bash
-# 1. Bring up Postgres, MinIO, run migrations, start relic-api.
+# 1. Clone and configure
 git clone https://github.com/therelicai/therelic-platform
 cd therelic-platform
+./scripts/setup.sh           # interactive: 4 questions, writes .env
+
+# 2. Boot the stack
 docker compose up -d
+curl -fsS http://localhost:8080/readyz   # 200 once Postgres + S3 are up
 
-# 2. (Optional but recommended) generate production secrets and
-#    restart so trace HMAC chain verification + peppered API key
-#    hashing are active.
-cp .env.example .env
-echo "RELIC_TRACE_KEY=$(openssl rand -hex 32)"      >> .env
-echo "RELIC_API_KEY_PEPPER=$(openssl rand -hex 32)" >> .env
-docker compose up -d --force-recreate relic-api
-
-# 3. Sanity check: /readyz returns 200 once Postgres + S3 are
-#    reachable.
-curl -fsS http://localhost:8080/readyz | jq
-
-# 4. From any shell with the relic CLI installed
-#    (https://github.com/therelicai/therelic#install):
-relic init
-export RELIC_API_URL=http://localhost:8080
-export RELIC_API_KEY=rk_dev_test_key_do_not_use_in_production
-export RELIC_TRACE_KEY=...   # same value as step 2 if you set one
-relic run --mode permissive -- python my_agent.py
-relic trace push             # uploads to relic-api
-```
-
-### Adding the dashboard
-
-The dashboard ([therelic-app](https://github.com/therelicai/therelic-app))
-is shipped as a separate repo and a separate compose overlay. Clone
-it next to this one and bring the whole stack up with one command:
-
-```bash
+# 3. Add the dashboard (optional, but recommended)
 git clone https://github.com/therelicai/therelic-app ../therelic-app
-docker compose -f docker-compose.yml -f docker-compose.app.yml up -d --build
-open http://localhost:5173
+( cd ../therelic-app && VITE_AUTH_MODE=local VITE_API_URL=http://localhost:8080/v1 npm install && npm run build && npx vite preview )
+open http://localhost:4173
 ```
 
-The compose stack is sized for a laptop. For production deployments
-see [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md).
-
-### Creating a real API key
-
-The dev key seeded by `docker compose up` is fine for localhost but
-should never escape your machine. To create a real one, hit the API
-with the dev key once:
-
-```bash
-curl -s -X POST http://localhost:8080/v1/orgs/00000000-0000-0000-0000-000000000001/api-keys \
-  -H "Authorization: Bearer rk_dev_test_key_do_not_use_in_production" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"my-key"}' | jq
-```
-
-The response includes the plaintext key once — store it. If you set
-`RELIC_API_KEY_PEPPER`, new keys are stored as `HMAC-SHA256(pepper,
-key)`; the legacy SHA-256 plain-hash path stays available for the
-seed key until you rotate it.
+Log in with the `RELIC_ADMIN_EMAIL` / `RELIC_ADMIN_PASSWORD` you set
+during `setup.sh`. The dashboard shows your first traces as soon as
+an agent pushes them.
 
 ---
 
-## How It Fits Into The Relic Ecosystem
+## Where can I run this?
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Open Source (Apache 2.0) — github.com/therelicai/therelic   │
-│                                                              │
-│  relic CLI / MCP Proxy / Policy Engine / Trace Writer        │
-│  Runs on the user's machine. Governs AI agent actions.       │
-└──────────────────┬───────────────────────────────────────────┘
-                   │  HTTP (relic trace push, relic policy pull)
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│  This Repo — therelic-platform (BSL 1.1)                     │
-│                                                              │
-│  relic-api          — HTTP control plane: trace ingest,      │
-│                       integrity verification, policy serve   │
-│  relic-governance   — Background worker: denial-pattern      │
-│                       detection, proposal generation         │
-│  Postgres           — orgs, users, runs, agents, proposals   │
-│  S3 / MinIO         — raw NDJSON trace events                │
-└──────────────────┬───────────────────────────────────────────┘
-                   │  REST /v1/*
-                   ▼
-┌─────────────────────────────────────────────────────────────┐
-│  therelic-app — React SPA dashboard (BSL 1.1)                │
-│  therelic-website — Marketing site (Apache 2.0)               │
-└─────────────────────────────────────────────────────────────┘
-```
+Anywhere with a container runtime, a Postgres, and an S3-compatible
+bucket. The wizard handles every common combination:
 
-The runtime and the platform communicate **only over HTTP** — there is no shared Go import. The CLI works entirely standalone with local traces and local policy. The platform is an optional upgrade that adds cloud storage, team collaboration, and governance automation.
-
----
-
-## Architecture
-
-### Two Services
-
-| Service | Entry Point | Purpose |
+| Deployment | What you bring | Time |
 |---|---|---|
-| **relic-api** | `cmd/relic-api/main.go` | HTTP control plane serving all REST endpoints |
-| **relic-governance** | `cmd/relic-governance/main.go` | Background worker that polls for denial patterns and generates proposals |
+| Laptop (defaults) | Just Docker | 5 min |
+| Team self-host | Neon + Cloudflare R2 | 30 min |
+| Fly.io | Fly account | 30 min |
+| Supabase | Supabase project | 20 min |
+| Enterprise on-prem | Your own Postgres + S3 + IdP | A day |
 
-### API Endpoints
+Five deployment paths, end to end, are in
+[RUNNING.md](./RUNNING.md). Operational ops (env-var reference,
+upgrade procedure, backup/restore) are in
+[docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) and
+[docs/UPGRADING.md](./docs/UPGRADING.md).
 
-Base: `https://api.therelic.dev/v1` — Auth via Bearer JWT (Supabase Auth) or org-scoped API key.
+---
 
-Full request/response schemas live in [docs/api.md](./docs/api.md). Cross-repo
-contracts (selector shape, event types, replay protocol) live in
-[RELIC.md](./RELIC.md).
+## What's inside
 
-| Group | Endpoints | Description |
+| Service | Entry point | What it does |
 |---|---|---|
-| **Traces** | `POST /traces`, `GET /traces`, `GET /traces/:id`, `GET /traces/:id/events`, `DELETE /traces/:id` | Upload, list, view, download, and delete trace runs |
-| **Policy simulator** | `POST /policy/simulate`, `GET /policy/simulate/:job_id` | Replay candidate policy against historical traces and report the diff. The diff badge in the policy editor is the consumer. |
-| **Live feed** | `POST /intents`, `GET /orgs/:orgID/live` | Runtimes push sealed `intent`/`action` events as they happen; dashboards subscribe to the SSE stream. Postgres LISTEN/NOTIFY backplane, no extra infra. |
-| **Universal policy** | `POST /policy_sets`, `PUT /policy_sets/:id`, `GET /policy_sets/:id`, `POST /policy_sets/resolve`, `POST /agents/:name/labels`, `POST /agents/:name/policy_applied`, `GET /agents/:name/policy_updates` (SSE, agent-facing) | One policy_set applies to a labeled agent set. The agent-facing SSE channel is distinct from the dashboard one — different auth (API key vs JWT), different audience, different event shape. |
-| **Agents** | `POST /agents`, `GET /agents`, `GET /agents/:name`, `GET /agents/:name/policy`, `PUT /agents/:name/policy`, `GET /agents/:name/baseline` | Agent registry, policy distribution, behavioral baselines |
-| **Organizations** | `POST /orgs`, `GET /orgs/:id`, `POST /orgs/:id/api-keys`, `DELETE /orgs/:id/api-keys/:kid` | Org management and API key lifecycle |
-| **Proposals** | `GET /proposals`, `GET /proposals/:id`, `POST /proposals/:id/approve`, `POST /proposals/:id/reject`, `DELETE /proposals/:id` | Governance proposals from automated detection |
-| **Audit** | `GET /audit-events` | Platform-level audit trail |
-| **Onboarding** | `POST /onboard` | Explicit org creation for new signups |
-| **Registry** | `GET /registry`, `POST /registry`, `PUT /registry/:agentID`, `GET /registry/:agentID/trust` | Trust network and marketplace (future) |
-| **Transactions** | `GET /transactions`, `GET /transactions/summary` | Metered agent-to-agent transactions (future) |
+| `relic-api` | `cmd/relic-api/main.go` | HTTP control plane. Trace ingest, policy serve, auth, governance proposals, audit log. Default port `:8080`. |
+| `relic-governance` | `cmd/relic-governance/main.go` | Background worker. Scans denied actions, classifies them (heuristic or via Anthropic if `ANTHROPIC_API_KEY` is set), proposes policy rules. |
 
-### Middleware
+Plus subcommands on the same binary for operators:
 
-- **CORS** — Configurable via `ALLOWED_ORIGINS` (comma-separated)
-- **Rate limiting** — Token bucket per IP (10 req/s, burst 20)
-- **Auth** — JWT validation (HS256, configurable issuer/audience) or API key HMAC-SHA256 lookup with server pepper
-- **Request logging** — Structured JSON via `slog`, includes `request_id` (also returned via `X-Request-ID`)
-- **Metrics** — `/metrics` (Prometheus) and `/readyz` (DB + S3 health)
-
-### Governance Engine
-
-The governance worker runs on a 60-second poll interval:
-
-1. **Detection** — For each org, scans recent runs with denials. Downloads gzipped NDJSON traces from S3 to identify which specific tools were denied (not just aggregate counts).
-2. **Classification** — Sends denied tool + parameters to Claude for intent classification: is this a policy gap (user wants it allowed) or a correct denial (intentionally blocked)?
-3. **Proposal generation** — For classified gaps, creates a governance proposal with the suggested policy rule, evidence (run IDs, denial counts), and the LLM's reasoning.
-
-Proposals appear in the dashboard for human review (approve/reject/dismiss).
-
-### Database Schema
-
-Migrations in `migrations/` are applied in order by the `migrate`
-compose service. A `schema_migrations` tracking table is used so
-re-running `docker compose up` is idempotent.
-
-| Migration | Tables / change |
-|---|---|
-| 001 | `organizations`, `users`, `api_keys` |
-| 002 | `runs` (trace metadata index) |
-| 003 | `agents`, `agent_baselines` |
-| 004 | `proposals` |
-| 005 | `capability_listings`, `bilateral_agreements`, `transactions` |
-| 006 | Auth trigger (`handle_new_user`), `audit_events`, `invitations`, `updated_at` columns, API key scopes, agent policy storage |
-| 007 | Row-Level Security policies on all tables |
-| 008 | Run integrity columns (`integrity_chain`, `signed_envelope`) |
-| 009 | RLS completeness (`FORCE ROW LEVEL SECURITY` on all tenant tables) |
-| 010 | API key hash algorithm column (HMAC-SHA256 with pepper) |
-| 011 | `runs.chain_verified` for server-validated HMAC chain |
+```bash
+relic-api migrate up          # apply pending migrations
+relic-api migrate status      # list applied migrations + schema version
+relic-api version             # print build + schema version
+relic-api backup OUT.tar.gz   # dump database + S3 manifest
+relic-api restore IN.tar.gz   # restore from a backup
+relic-api reset-password EMAIL [NEW_PASSWORD]   # local-auth recovery
+```
 
 ---
 
-## Local Development
+## How auth works
 
-### Prerequisites
+Three modes, picked at boot via `RELIC_AUTH_MODE`:
 
-- Docker (and `docker compose`) — for the integrated stack
-- Go 1.23+ — only if you want to run the API directly without Docker
-
-### Run everything in Docker (recommended)
-
-```bash
-docker compose up -d
-docker compose logs -f relic-api    # follow API logs
-curl http://localhost:8080/readyz   # 200 once Postgres + MinIO are up
-```
-
-This brings up Postgres (`:54322`), MinIO (`:9000`, console `:9001`),
-applies migrations once, creates the trace bucket, and starts
-`relic-api` on `:8080`. Re-running the same command is safe — the
-`schema_migrations` table tracks what's already been applied.
-
-### Run the API outside Docker
-
-```bash
-docker compose up -d postgres minio minio-init migrate
-
-DATABASE_URL="postgres://relic:relic@localhost:54322/therelic?sslmode=disable" \
-S3_ENDPOINT="http://localhost:9000" \
-S3_BUCKET="relic-traces" \
-S3_ACCESS_KEY="relicminio" \
-S3_SECRET_KEY="relicminio" \
-S3_REGION="us-east-1" \
-ALLOWED_ORIGINS="http://localhost:5173,http://localhost:5174" \
-go run ./cmd/relic-api
-```
-
-The governance worker is a separate binary:
-
-```bash
-DATABASE_URL="postgres://relic:relic@localhost:54322/therelic?sslmode=disable" \
-ANTHROPIC_API_KEY="sk-ant-..." \
-S3_ENDPOINT="http://localhost:9000" \
-S3_BUCKET="relic-traces" \
-S3_ACCESS_KEY="relicminio" \
-S3_SECRET_KEY="relicminio" \
-go run ./cmd/relic-governance
-```
-
-### Environment Variables
-
-#### Required
-
-| Variable | Description |
-|---|---|
-| `DATABASE_URL` | Postgres connection string |
-| `S3_ENDPOINT` | S3-compatible endpoint (MinIO, Cloudflare R2, AWS, B2) |
-| `S3_BUCKET` | Bucket name for trace storage |
-| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | S3 credentials |
-| `RELIC_AUTH_MODE` | `local` / `supabase` / `oidc` (oidc is stubbed in v1) |
-
-#### Auth mode-specific
-
-| Mode | Required env vars |
-|---|---|
-| `local` | `RELIC_JWT_SECRET` (32-byte hex). On first boot, optionally `RELIC_ADMIN_EMAIL` + `RELIC_ADMIN_PASSWORD` to bootstrap an admin. |
-| `supabase` | `SUPABASE_JWT_SECRET` from your Supabase project settings. |
-| `oidc` | _Lands in ROADMAP Phase 1 (SSO/SAML/SCIM)._ |
-
-#### Strongly recommended for production
-
-| Variable | Description |
-|---|---|
-| `RELIC_JWT_ISSUER` / `RELIC_JWT_AUDIENCE` | Expected JWT `iss` / `aud` claims |
-| `RELIC_API_KEY_PEPPER` | Server-side pepper for HMAC-SHA256 API key hashing (Slice 3) |
-| `RELIC_TRACE_KEY` | 32-byte hex master secret enabling server-side HMAC chain verification (Slice 6) |
-| `RELIC_REQUIRE_SEALED_TRACES` | `1` to reject uploads missing an HMAC chain |
-| `RELIC_RLS_ENABLED` | `true` to apply opt-in RLS migrations (defense-in-depth) |
-| `ALLOWED_ORIGINS` | Comma-separated CORS origin allowlist |
-
-### Blob storage providers
-
-The storage layer uses pure S3 API (PutObject, GetObject, DeleteObject,
-HeadBucket) with path-style addressing, so any S3-compatible store
-works. Pick one based on cost and where your data should live.
-
-| Provider | `S3_ENDPOINT` | `S3_REGION` | Free tier | Notes |
-|---|---|---|---|---|
-| **MinIO** (Docker) | `http://minio:9000` | `us-east-1` | unlimited (your disk) | Wired into `docker compose` by default. Zero-config local dev. |
-| **Cloudflare R2** | `https://<account>.r2.cloudflarestorage.com` | `auto` | 10 GB storage, 1M class A reads/mo | No egress fees. Recommended for production self-host. |
-| **Backblaze B2** | `https://s3.<region>.backblazeb2.com` | e.g. `us-west-002` | 10 GB storage, 1 GB/day egress | Cheapest pay-as-you-go beyond free tier. |
-| **AWS S3** | _omit (uses AWS default)_ | e.g. `us-east-1` | 5 GB for 12 mo | Standard choice if you're already on AWS. |
-| **Wasabi / Linode Object Storage** | provider-specific | `us-east-1` | varies | Both fully S3-compatible. |
-
-All five work without code changes. Switch providers by editing `.env`.
-
-#### Operational tuning
-
-| Variable | Default | Description |
+| Mode | What it is | When to pick it |
 |---|---|---|
-| `PORT` | `8080` | API port |
-| `S3_REGION` | `auto` | S3 region |
-| `RELIC_PG_MAX_CONNS` | `20` | pgxpool max connections |
-| `RELIC_PG_MIN_CONNS` | `2` | pgxpool min connections |
-| `RELIC_PG_MAX_LIFETIME` | `30m` | Connection lifetime |
-| `RELIC_PG_MAX_IDLE_TIME` | `5m` | Idle connection timeout |
-| `RELIC_RETENTION_DISABLED` | unset | Set to `1` to skip the retention sweeper |
-| `RELIC_RETENTION_INTERVAL` | `15m` | Retention worker sweep interval |
-| `RELIC_RETENTION_BATCH` | `100` | Max runs reaped per sweep |
-| `ANTHROPIC_API_KEY` | — | Enables LLM-powered intent classification (governance worker) |
+| `local` | HS256 JWT signed by `RELIC_JWT_SECRET`. bcrypt passwords in `users.password_hash`. First-boot admin from env vars. | Self-host, small teams, evaluation. |
+| `supabase` | HS256 JWT verified against `SUPABASE_JWT_SECRET`. All lifecycle is Supabase's. | Existing Supabase users. |
+| `oidc` | Stub today; lands in ROADMAP Phase 1 (SSO/SAML/SCIM). | Enterprise SSO. |
 
-### Observability
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /readyz` | Returns 200 once Postgres + S3 are reachable; 503 otherwise |
-| `GET /metrics` | Prometheus exposition: HTTP, trace uploads, retention sweeps, DB pool stats |
-
-### Deployment
-
-For Fly.io see `fly.toml` and `docs/DEPLOYMENT.md`. For any other
-container host, the included `Dockerfile` is single-stage-Alpine and
-~30 MB — drop it on Render, Railway, Cloud Run, ECS, or your own
-Kubernetes cluster.
+Login (`/v1/auth/login`, local mode only) is rate-limited per IP: 5
+attempts burst, then 1 per 10 seconds. Brute force is intentionally
+slow.
 
 ---
 
-## Project Structure
+## How storage works
 
-```
-cmd/
-  relic-api/           # HTTP API server entry point
-  relic-governance/    # Governance worker entry point
-internal/
-  api/                 # HTTP handlers, middleware, routing
-    middleware/         # Auth, rate limiting
-  governance/          # Worker, detector, classifier, proposer
-  metrics/             # Prometheus instrumentation
-  retention/           # Background sweeper for expired traces
-  storage/             # Postgres and S3 clients
-  trace/               # Server-side NDJSON parser + HMAC verifier
-migrations/            # SQL migration files
-docs/                  # Architecture, deployment, development guides
-```
+Pure S3 API with path-style addressing. Drop in any S3-compatible
+store:
+
+| Provider | Free tier | Notes |
+|---|---|---|
+| MinIO (Docker) | unlimited (your disk) | Default in `docker compose`. |
+| Cloudflare R2 | 10 GB + zero egress | Recommended for production self-host. |
+| Backblaze B2 | 10 GB + 1 GB/day | Cheapest pay-as-you-go beyond free. |
+| AWS S3 | 5 GB for 12 mo | Standard choice on AWS. |
+| Wasabi / Linode | varies | Both work without code changes. |
+
+Switch providers by editing `.env` — no code changes.
 
 ---
 
-## Documentation
+## The four repos
 
-| Document | Description |
+| Repo | What it is |
 |---|---|
-| [RELIC.md](./RELIC.md) | Cross-repo alignment doc — selector contract, event shapes, replay protocol, lifecycle. Authoritative across all four repos. |
-| [docs/api.md](./docs/api.md) | Full endpoint reference (request/response schemas). The README endpoint table summarizes; this is the source of truth. |
-| [CHANGELOG.md](./CHANGELOG.md) | Release notes (Keep-a-Changelog format). |
-| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Full technical architecture |
-| [docs/BUILD_PLAN.md](./docs/BUILD_PLAN.md) | Master build plan and phasing |
-| [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) | Fly.io, Cloudflare, Supabase deployment guide |
-| [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) | Local development setup |
-| [docs/DOMAINS.md](./docs/DOMAINS.md) | Domain and DNS architecture |
+| [therelic](https://github.com/therelicai/therelic) | The OSS runtime. CLI + MCP proxy + policy engine. |
+| **therelic-platform** (this repo) | Server side. Trace storage, governance, the REST API. |
+| [therelic-app](https://github.com/therelicai/therelic-app) | React dashboard that consumes this API. |
+| [therelic-website](https://github.com/therelicai/therelic-website) | Marketing site at [therelic.dev](https://therelic.dev). |
+
+All four are Apache 2.0.
+
+---
+
+## Docs
+
+- [RUNNING.md](./RUNNING.md) — five-path quickstart
+- [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) — env-var reference,
+  auth modes, storage providers, operational tasks
+- [docs/UPGRADING.md](./docs/UPGRADING.md) — migration table, backup,
+  breaking changes, rollback
+- [docs/THREAT_MODEL.md](./docs/THREAT_MODEL.md) — assets, trust
+  boundaries, defended adversaries, known gaps
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — full design
+- [docs/api.md](./docs/api.md) — endpoint reference
+
+---
+
+## License
+
+[Apache License 2.0](LICENSE). Trademarks reserved — see
+[TRADEMARKS.md](TRADEMARKS.md).

@@ -23,8 +23,8 @@ its contents.
 | Repo | Role | License | Talks to |
 |---|---|---|---|
 | `therelic` | Open-source CLI + runtime (Go). Collector and enforcer. Installed on user machines/servers. | Apache 2.0 | `therelic-platform` (only when configured) |
-| `therelic-platform` | Hosted API (Go, Postgres, S3). Multi-tenant brain. No UI. | BSL 1.1 → Apache 2.0 | `therelic`, `therelic-app` |
-| `therelic-app` | Web console (React/TypeScript). Owns presentation, no business logic. | BSL 1.1 → Apache 2.0 | `therelic-platform` |
+| `therelic-platform` | Hosted API (Go, Postgres, S3). Multi-tenant brain. No UI. | Apache 2.0 | `therelic`, `therelic-app` |
+| `therelic-app` | Web console (React/TypeScript). Owns presentation, no business logic. | Apache 2.0 | `therelic-platform` |
 | `therelic-website` | Static marketing site. No product surface, no auth. | — | nothing |
 
 The runtime works standalone (no `RELIC_API_KEY` set): traces stay local,

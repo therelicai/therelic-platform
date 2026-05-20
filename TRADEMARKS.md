@@ -1,6 +1,6 @@
 # Trademark Policy
 
-The Business Source License 1.1 covers the source code in this
+The Apache License 2.0 covers the source code in this
 repository. Neither it nor its Change License (Apache 2.0) grants
 rights to the trademarks of The Relic AI, Inc. This document explains
 what is and isn't permitted use of those marks.
@@ -17,8 +17,7 @@ what is and isn't permitted use of those marks.
 ## What you may do without asking
 
 - **Run, fork, modify, and redistribute the source code** under the
-  Business Source License 1.1 (and, after the Change Date, the Apache
-  License 2.0). The license is the license; nothing in this document
+  Apache License 2.0. The license is the license; nothing in this document
   restricts your code rights.
 - **Refer to The Relic by name** in articles, blog posts, talks,
   comparisons, books, course material, social posts, and similar
