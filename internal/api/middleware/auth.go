@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 
@@ -75,15 +74,14 @@ func (a *Auth) Middleware(next http.Handler) http.Handler {
 		}
 
 		// JWT auth: hand off to the provider for verification.
+		// Any verify error (ErrInvalidToken, expiry, audience
+		// mismatch, transient JWKS failure) collapses to a single
+		// 401. Disclosing which factor failed would help brute-force
+		// attempts against the signing secret.
 		claims, err := a.provider.Verify(r.Context(), token)
 		if err != nil {
-			// Don't leak which factor failed (signature vs expiry vs
-			// audience) — that's a fingerprinting surface for
-			// brute-force attempts against the secret.
-			if errors.Is(err, auth.ErrInvalidToken) || err != nil {
-				writeError(w, http.StatusUnauthorized, "invalid credentials")
-				return
-			}
+			writeError(w, http.StatusUnauthorized, "invalid credentials")
+			return
 		}
 		ctx := r.Context()
 		if claims.UserID != "" {

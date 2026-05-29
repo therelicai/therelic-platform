@@ -146,10 +146,24 @@ func (d *Detector) parseTraceDenials(ctx context.Context, storageKey string) (ma
 	}
 	defer gz.Close()
 
+	toolCounts, sampleParam, parseErr := parseDeniedToolsNDJSON(gz)
+	if parseErr != nil {
+		return nil, "", parseErr
+	}
+	if err := gz.Close(); err != nil && err != io.EOF {
+		return nil, "", err
+	}
+	return toolCounts, sampleParam, nil
+}
+
+// parseDeniedToolsNDJSON reads NDJSON trace events from r and returns a map
+// of tool name -> denial count, plus a sample params string. Extracted from
+// parseTraceDenials so it can be tested without an S3 round-trip.
+func parseDeniedToolsNDJSON(r io.Reader) (map[string]int, string, error) {
 	toolCounts := make(map[string]int)
 	var sampleParam string
 
-	scanner := bufio.NewScanner(gz)
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
 	for scanner.Scan() {
@@ -184,10 +198,6 @@ func (d *Detector) parseTraceDenials(ctx context.Context, storageKey string) (ma
 	if err := scanner.Err(); err != nil {
 		return nil, "", err
 	}
-	if err := gz.Close(); err != nil && err != io.EOF {
-		return nil, "", err
-	}
-
 	return toolCounts, sampleParam, nil
 }
 

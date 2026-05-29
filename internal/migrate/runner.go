@@ -91,6 +91,20 @@ func (r *Runner) Up(ctx context.Context) (int, error) {
 	}
 
 	if r.opts.RLSEnabled && r.opts.RLSDir != "" {
+		// Loud warning: migrations.rls/002 enables FORCE ROW LEVEL
+		// SECURITY on every tenant table. The API does NOT yet emit
+		// `SET LOCAL request.jwt.claims = ...` per request, so once
+		// these policies are in force every Postgres query will see
+		// zero rows (get_org_id() returns ''). Until the storage
+		// layer is wired for per-request claim-setting, RLS is a
+		// foot-gun, not defense-in-depth.
+		//
+		// Apply on operator's explicit request anyway — they may be
+		// targeting an analytics replica / pgAdmin role where this
+		// is the desired behavior. Just refuse to be silent about it.
+		r.logger.Warn("applying RLS migrations: API does not currently set request.jwt.claims per request — once 002 lands, primary API queries will return zero rows. Only enable this against analytics/replica connections that DO set the claim.",
+			"rls_dir", r.opts.RLSDir,
+			"action_required", "implement per-request SET LOCAL request.jwt.claims in storage layer before enabling RLS for the API role")
 		n, err := r.applyFolder(ctx, r.opts.RLSDir, "rls")
 		if err != nil {
 			return applied, fmt.Errorf("apply rls migrations: %w", err)

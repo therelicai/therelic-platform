@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -26,14 +27,28 @@ type SupabaseProvider struct {
 // NewSupabaseProvider constructs a SupabaseProvider. Returns an error
 // when the secret is empty because there's no legitimate path where
 // supabase mode is correct with no secret.
+//
+// Warns when RELIC_JWT_ISSUER or RELIC_JWT_AUDIENCE are unset: without
+// them, Verify accepts any HS256 token signed with the shared secret
+// regardless of who issued it or what audience it targets, which
+// weakens defense-in-depth if the secret ever leaks (token replay
+// from a sibling Supabase project, mis-routed tokens, etc.).
 func NewSupabaseProvider(secret string) (*SupabaseProvider, error) {
 	if secret == "" {
 		return nil, errors.New("SUPABASE_JWT_SECRET is required for RELIC_AUTH_MODE=supabase")
 	}
+	issuer := os.Getenv("RELIC_JWT_ISSUER")
+	audience := os.Getenv("RELIC_JWT_AUDIENCE")
+	if issuer == "" || audience == "" {
+		slog.Warn("supabase auth: issuer/audience binding not configured — tokens accepted without iss/aud check",
+			"issuer_set", issuer != "",
+			"audience_set", audience != "",
+			"recommendation", "set RELIC_JWT_ISSUER and RELIC_JWT_AUDIENCE to pin token origin")
+	}
 	return &SupabaseProvider{
 		jwtSecret: []byte(secret),
-		issuer:    os.Getenv("RELIC_JWT_ISSUER"),
-		audience:  os.Getenv("RELIC_JWT_AUDIENCE"),
+		issuer:    issuer,
+		audience:  audience,
 	}, nil
 }
 

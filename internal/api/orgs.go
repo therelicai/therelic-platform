@@ -13,11 +13,28 @@ import (
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$`)
 
 func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
+	// Reject callers that already have an org context. This endpoint
+	// exists for the fresh-signup window — between token issuance and
+	// org assignment — where the caller has a valid token but no
+	// org_id yet. In every supported auth mode (local, supabase, oidc)
+	// users normally arrive with an org already bound; an authed
+	// caller hitting this path means they're either (a) attempting to
+	// spin up sibling orgs they shouldn't have, or (b) trying to
+	// abuse the endpoint to fill the orgs table. Both paths are
+	// denied here. Sibling-org access goes through the bilateral
+	// agreements flow, not org self-creation.
+	if callerOrg := middleware.OrgIDFromContext(r.Context()); callerOrg != "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "caller already has an org; use bilateral agreements for cross-org access",
+		})
+		return
+	}
+
 	var req struct {
 		Name string `json:"name"`
 		Slug string `json:"slug"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
